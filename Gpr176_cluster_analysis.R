@@ -78,8 +78,12 @@ read_geo_excel <- function(path) {
   sheets <- readxl::excel_sheets(path)
   message("  シート: ", paste(sheets, collapse = ", "))
 
+  # "Raw Data" シートを優先、なければ最初のシートを使用
+  target_sheet <- if ("Raw Data" %in% sheets) "Raw Data" else sheets[1]
+  message("  使用シート: ", target_sheet)
+
   # guess_max を大きくして型推定を正確に
-  tbl <- readxl::read_excel(path, sheet = sheets[1],
+  tbl <- readxl::read_excel(path, sheet = target_sheet,
                              col_names = TRUE, guess_max = 5000)
   df  <- as.data.frame(tbl, stringsAsFactors = FALSE)
   message(sprintf("  読込直後: %d 行 × %d 列", nrow(df), ncol(df)))
