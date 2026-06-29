@@ -147,3 +147,25 @@ ggsave("volcano_CT6_CT18_combined.pdf", plot = combined, width = 14, height = 6)
 message("Saved: volcano_CT6_CT18_combined.pdf")
 
 print(combined)
+
+# ---- CT6・CT18 共通遺伝子の抽出 ----
+sig6  <- res_ct6[res_ct6$sig  != "NS", c("probe_id", "gene_symbol", "log2FC", "pval", "sig")]
+sig18 <- res_ct18[res_ct18$sig != "NS", c("probe_id", "gene_symbol", "log2FC", "pval", "sig")]
+
+colnames(sig6)  <- c("probe_id", "gene_symbol", "log2FC_CT6",  "pval_CT6",  "sig_CT6")
+colnames(sig18) <- c("probe_id", "gene_symbol", "log2FC_CT18", "pval_CT18", "sig_CT18")
+
+common <- merge(sig6, sig18, by = c("probe_id", "gene_symbol"))
+
+# 同方向（両方ともUp or 両方ともDown）のみ
+common_same <- common[common$sig_CT6 == common$sig_CT18, ]
+common_same <- common_same[order(common_same$pval_CT6), ]
+
+write.csv(common_same, "common_CT6_CT18.csv", row.names = FALSE)
+message(sprintf("Saved: common_CT6_CT18.csv  (%d probes)", nrow(common_same)))
+
+# サマリー表示
+message(sprintf("  共通Up   (KOで上昇): %d", sum(common_same$sig_CT6 == "Up in KO")))
+message(sprintf("  共通Down (KOで低下): %d", sum(common_same$sig_CT6 == "Down in KO")))
+message("\n--- 共通遺伝子 Top20 ---")
+print(head(common_same[, c("gene_symbol", "log2FC_CT6", "log2FC_CT18", "pval_CT6", "pval_CT18", "sig_CT6")], 20))
