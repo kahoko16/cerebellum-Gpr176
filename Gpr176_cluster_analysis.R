@@ -7,332 +7,327 @@
 # GEO: GSE165805
 #
 # 目的: Gpr176陽性クラスターにGnaz（Gz）とRGS16が発現するかを検証
-#
-# 解析の流れ:
-#   1. GEOからメタデータ（クラスターラベル）と発現行列を取得
-#   2. Gpr176の発現でクラスターを定義（陽性 vs 陰性）
-#   3. 各クラスター内でのGnaz・RGS16の発現量を可視化
 # ============================================================
 
 # ---- パッケージ ----
-required_pkgs <- c("GEOquery", "Seurat", "ggplot2", "dplyr", "Matrix",
-                   "patchwork", "viridis", "stringr")
-for (pkg in required_pkgs) {
-  if (!requireNamespace(pkg, quietly = TRUE)) {
-    if (pkg %in% c("GEOquery", "Seurat")) {
-      if (!requireNamespace("BiocManager", quietly = TRUE))
-        install.packages("BiocManager")
-      BiocManager::install(pkg, ask = FALSE, update = FALSE)
-    } else {
-      install.packages(pkg, repos = "https://cloud.r-project.org")
-    }
-  }
+required_cran <- c("ggplot2", "dplyr", "patchwork", "viridis",
+                   "tidyr", "Matrix", "readxl", "stringr")
+required_bioc <- c("GEOquery")
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager", repos = "https://cloud.r-project.org")
+
+for (pkg in required_cran) {
+  if (!requireNamespace(pkg, quietly = TRUE))
+    install.packages(pkg, repos = "https://cloud.r-project.org")
+  library(pkg, character.only = TRUE)
+}
+for (pkg in required_bioc) {
+  if (!requireNamespace(pkg, quietly = TRUE))
+    BiocManager::install(pkg, ask = FALSE, update = FALSE)
   library(pkg, character.only = TRUE)
 }
 
 # ---- 設定 ----
-GEO_ID       <- "GSE165805"
-GENES_OF_INT <- c("Gpr176", "Gnaz", "Rgs16")  # Gz = Gnaz
-OUT_DIR      <- "Gpr176_cluster_results"
+GEO_ID           <- "GSE165805"
+GENES_OF_INT     <- c("Gpr176", "Gnaz", "Rgs16")
+OUT_DIR          <- "Gpr176_cluster_results"
+GPR176_THRESHOLD <- 0      # log-norm > 0 で陽性
+POS_PCT_THR      <- 10     # クラスター内Gpr176陽性率(%)がこれ以上を陽性クラスターとする
+
 dir.create(OUT_DIR, showWarnings = FALSE)
 
-# Gpr176「陽性」の閾値（正規化カウント > この値なら陽性）
-GPR176_THRESHOLD <- 0  # 0より大きければ陽性（検出可）
+# ---- ユーティリティ ----
+find_gene <- function(gene, all_genes) {
+  if (gene %in% all_genes) return(gene)
+  m <- all_genes[tolower(all_genes) == tolower(gene)]
+  if (length(m) > 0) return(m[1])
+  NA_character_
+}
 
-# ---- Step 1: GEOからデータ取得 ----
-message("\n=== Step 1: GEOデータ取得 ===")
-# GEOqueryでシリーズ情報を取得（SupplementaryFilesのURLを確認するため）
-gse <- GEOquery::getGEO(GEO_ID, GSEMatrix = FALSE)
-
-# GSE165805はSeuratオブジェクト形式で提供されている場合があるため
-# まずGSEMatrixで試みる
-gse_matrix <- GEOquery::getGEO(GEO_ID, GSEMatrix = TRUE)
-message("GSEMatrix取得完了")
-
-# ---- Step 2: 補足ファイルのダウンロード ----
-# GSE165805は複数のSupplementaryファイルを持つ
-# count matrix + cell metadata の取得を試みる
-message("\n=== Step 2: 補足ファイルのダウンロード ===")
+# ================================================================
+# Step 1: GEOから補足ファイルをダウンロード
+# ================================================================
+message("\n=== Step 1: GEOデータ取得 (", GEO_ID, ") ===")
 
 supp_dir <- file.path(OUT_DIR, "supp_files")
 dir.create(supp_dir, showWarnings = FALSE)
 
-# GEOquery::getGEOSuppFiles でダウンロード
 supp_files <- GEOquery::getGEOSuppFiles(GEO_ID, baseDir = supp_dir, fetch_files = TRUE)
-message("補足ファイルリスト:")
-print(rownames(supp_files))
-
-# ---- Step 3: ファイル特定とロード ----
-message("\n=== Step 3: ファイルのロードと解析 ===")
-
 supp_paths <- rownames(supp_files)
+message("ダウンロードされたファイル:")
+for (p in supp_paths) message("  ", basename(p))
 
-# ファイル種別を特定する関数
-find_file <- function(paths, patterns) {
-  for (pat in patterns) {
-    m <- grep(pat, paths, ignore.case = TRUE, value = TRUE)
-    if (length(m) > 0) return(m[1])
-  }
-  return(NULL)
+# ================================================================
+# Step 2: Excelファイルの読み込みと結合
+# ================================================================
+message("\n=== Step 2: Excelファイルの読み込み ===")
+
+xlsx_files <- supp_paths[grepl("\\.xlsx$", supp_paths, ignore.case = TRUE)]
+
+if (length(xlsx_files) == 0) {
+  stop("Excelファイルが見つかりません。\nダウンロードされたファイル:\n",
+       paste(supp_paths, collapse = "\n"))
 }
 
-# Seuratオブジェクト(.rds)があればそれを使う
-rds_file <- find_file(supp_paths, c("\\.rds$", "\\.RDS$", "\\.Rds$"))
+message(length(xlsx_files), "個のExcelファイルを検出:")
+for (f in xlsx_files) message("  ", basename(f))
 
-if (!is.null(rds_file)) {
-  # .gz圧縮なら解凍
-  if (grepl("\\.gz$", rds_file)) {
-    rds_ungz <- sub("\\.gz$", "", rds_file)
-    if (!file.exists(rds_ungz)) R.utils::gunzip(rds_file, destname = rds_ungz, remove = FALSE)
-    rds_file <- rds_ungz
+# 各Excelファイルを読み込んで結合
+read_geo_excel <- function(path) {
+  sheets <- readxl::excel_sheets(path)
+  message("  シート: ", paste(sheets, collapse = ", "))
+
+  # シートが1つなら直接読む、複数なら最初のシートを使用
+  # GEO processed data: 行=遺伝子, 列=細胞 が多い
+  df <- readxl::read_excel(path, sheet = sheets[1], col_names = TRUE)
+  df <- as.data.frame(df)
+
+  # 1列目が遺伝子名かどうか確認
+  if (is.character(df[[1]]) || is.factor(df[[1]])) {
+    rownames(df) <- df[[1]]
+    df <- df[, -1, drop = FALSE]
   }
-  message("Seuratオブジェクトを読み込み中: ", rds_file)
-  seurat_obj <- readRDS(rds_file)
+  # 数値列のみ残す
+  df <- df[, sapply(df, is.numeric), drop = FALSE]
+  as.matrix(df)
+}
 
+mat_list <- lapply(xlsx_files, function(f) {
+  message("読み込み中: ", basename(f))
+  read_geo_excel(f)
+})
+names(mat_list) <- basename(xlsx_files)
+
+# 行（遺伝子）名を確認
+gene_sets <- lapply(mat_list, rownames)
+common_genes <- Reduce(intersect, gene_sets)
+message("\n共通遺伝子数: ", length(common_genes),
+        " (全ファイル共通)")
+
+# ファイルを列方向に結合（細胞を横に並べる）
+if (length(mat_list) == 1) {
+  count_mat <- mat_list[[1]]
 } else {
-  # matrix.mtx / barcodes.tsv / features.tsv の組み合わせを探す
-  mtx_file      <- find_file(supp_paths, c("matrix.*\\.mtx", "count.*\\.mtx"))
-  barcode_file  <- find_file(supp_paths, c("barcode", "cell"))
-  feature_file  <- find_file(supp_paths, c("feature", "gene"))
-  meta_file     <- find_file(supp_paths, c("meta", "cluster", "annotation", "label"))
-
-  # .gz解凍
-  decompress <- function(f) {
-    if (!is.null(f) && grepl("\\.gz$", f)) {
-      out <- sub("\\.gz$", "", f)
-      if (!file.exists(out)) R.utils::gunzip(f, destname = out, remove = FALSE)
-      return(out)
-    }
-    f
-  }
-  mtx_file     <- decompress(mtx_file)
-  barcode_file <- decompress(barcode_file)
-  feature_file <- decompress(feature_file)
-  meta_file    <- decompress(meta_file)
-
-  if (!is.null(mtx_file) && !is.null(barcode_file) && !is.null(feature_file)) {
-    message("10x形式matrixを読み込み中...")
-    counts <- Seurat::ReadMtx(mtx = mtx_file,
-                              cells = barcode_file,
-                              features = feature_file)
-    seurat_obj <- Seurat::CreateSeuratObject(counts = counts, project = GEO_ID)
-
-    if (!is.null(meta_file)) {
-      meta_df <- read.csv(meta_file, row.names = 1, check.names = FALSE)
-      # cellIDが一致するものだけ追加
-      common_cells <- intersect(colnames(seurat_obj), rownames(meta_df))
-      seurat_obj <- seurat_obj[, common_cells]
-      seurat_obj <- Seurat::AddMetaData(seurat_obj, meta_df[common_cells, , drop = FALSE])
-    }
-
-  } else {
-    # TSV/CSV形式のカウントマトリクスを探す
-    count_csv <- find_file(supp_paths, c("count.*\\.csv", "expr.*\\.csv",
-                                         "count.*\\.tsv", "expr.*\\.tsv"))
-    count_csv <- decompress(count_csv)
-    if (!is.null(count_csv)) {
-      message("CSV/TSV形式のカウントマトリクスを読み込み中...")
-      sep_char <- ifelse(grepl("\\.tsv", count_csv), "\t", ",")
-      counts_df <- read.table(count_csv, sep = sep_char, header = TRUE,
-                              row.names = 1, check.names = FALSE)
-      counts_mat <- as.matrix(counts_df)
-      seurat_obj <- Seurat::CreateSeuratObject(counts = counts_mat, project = GEO_ID)
-    } else {
-      stop("認識できる発現行列ファイルが見つかりませんでした。\n",
-           "ダウンロードされたファイル:\n",
-           paste(supp_paths, collapse = "\n"))
-    }
-  }
+  mats_aligned <- lapply(mat_list, function(m) m[common_genes, , drop = FALSE])
+  count_mat <- do.call(cbind, mats_aligned)
+  # 細胞名の重複を避けるためファイル名プレフィックスを付与
+  prefixes <- sub("_GEO_processed_data_", "_",
+                  sub("\\.xlsx$", "", basename(xlsx_files)))
+  new_colnames <- unlist(mapply(function(m, pfx) paste0(pfx, "_", colnames(m)),
+                                mats_aligned, prefixes, SIMPLIFY = FALSE))
+  colnames(count_mat) <- new_colnames
 }
 
-message("Seuratオブジェクト概要:")
-print(seurat_obj)
+message("発現行列サイズ: ", nrow(count_mat), " 遺伝子 × ", ncol(count_mat), " 細胞")
 
-# ---- Step 4: 遺伝子の存在確認 ----
-message("\n=== Step 4: 対象遺伝子の確認 ===")
+# ---- データ種別の推定（生カウント vs 正規化済み） ----
+sample_vals <- count_mat[count_mat > 0]
+is_raw_count <- all(sample_vals == floor(sample_vals)) && max(sample_vals) > 100
+message("データ種別: ", if (is_raw_count) "生カウント（正規化を実施）" else "正規化済み（正規化をスキップ）")
 
-all_genes <- rownames(seurat_obj)
+# ================================================================
+# Step 3: 遺伝子の確認
+# ================================================================
+message("\n=== Step 3: 対象遺伝子の確認 ===")
 
-# 大文字小文字を考慮した検索
-find_gene <- function(gene, all_genes) {
-  # 完全一致
-  if (gene %in% all_genes) return(gene)
-  # 大文字小文字無視
-  m <- all_genes[tolower(all_genes) == tolower(gene)]
-  if (length(m) > 0) return(m[1])
-  # 部分一致
-  m <- grep(paste0("^", gene, "$"), all_genes, value = TRUE, ignore.case = TRUE)
-  if (length(m) > 0) return(m[1])
-  return(NA)
+all_genes <- rownames(count_mat)
+gene_map <- setNames(
+  sapply(GENES_OF_INT, find_gene, all_genes = all_genes),
+  GENES_OF_INT
+)
+
+for (nm in names(gene_map)) {
+  status <- if (!is.na(gene_map[nm])) paste0("✓ (", gene_map[nm], ")") else "✗ 未検出"
+  message("  ", nm, " -> ", status)
 }
 
-gene_map <- setNames(sapply(GENES_OF_INT, find_gene, all_genes = all_genes), GENES_OF_INT)
-message("遺伝子名マッピング:")
-print(gene_map)
-
-missing <- gene_map[is.na(gene_map)]
-if (length(missing) > 0) {
-  message("⚠ 以下の遺伝子が発現行列に見つかりません: ", paste(names(missing), collapse = ", "))
+if (is.na(gene_map["Gpr176"])) {
+  stop("Gpr176が発現行列に見つかりません。解析を中断します。")
 }
 
-found_genes <- gene_map[!is.na(gene_map)]
-if (length(found_genes) == 0) stop("解析対象遺伝子が1つも見つかりません")
+# ================================================================
+# Step 4: 正規化
+# ================================================================
+message("\n=== Step 4: 正規化 ===")
 
-# ---- Step 5: 正規化 ----
-message("\n=== Step 5: データ正規化 ===")
-seurat_obj <- Seurat::NormalizeData(seurat_obj,
-                                    normalization.method = "LogNormalize",
-                                    scale.factor = 10000,
-                                    verbose = FALSE)
-message("LogNormalize完了（log(CP10K + 1)）")
-
-# ---- Step 6: Gpr176陽性細胞の同定 ----
-message("\n=== Step 6: Gpr176陽性クラスターの同定 ===")
-
-gpr176_gene <- found_genes["Gpr176"]
-if (is.na(gpr176_gene)) {
-  stop("Gpr176が発現行列に見つからないため解析を中断します")
+if (is_raw_count) {
+  # log CP10K
+  col_sums   <- colSums(count_mat)
+  norm_mat   <- sweep(count_mat, 2, col_sums / 1e4, "/")
+  norm_mat   <- log1p(norm_mat)
+  message("LogNormalize完了（log(CP10K + 1)）")
+} else {
+  norm_mat <- count_mat
+  message("正規化済みデータをそのまま使用")
 }
 
-# 正規化済み発現量を取得
-norm_data  <- Seurat::GetAssayData(seurat_obj, slot = "data")
-gpr176_exp <- norm_data[gpr176_gene, ]
+# ================================================================
+# Step 5: Gpr176陽性クラスターの同定
+# ================================================================
+message("\n=== Step 5: Gpr176陽性クラスターの同定 ===")
 
-# Gpr176陽性フラグ
-seurat_obj$Gpr176_positive <- gpr176_exp > GPR176_THRESHOLD
-seurat_obj$Gpr176_expr     <- as.numeric(gpr176_exp)
+gpr176_key <- gene_map["Gpr176"]
+gpr176_exp <- as.numeric(norm_mat[gpr176_key, ])
+names(gpr176_exp) <- colnames(norm_mat)
 
-n_pos <- sum(seurat_obj$Gpr176_positive)
-n_tot <- ncol(seurat_obj)
+gpr176_positive <- gpr176_exp > GPR176_THRESHOLD
+n_pos <- sum(gpr176_positive)
+n_tot <- ncol(norm_mat)
 message(sprintf("Gpr176陽性細胞: %d / %d (%.1f%%)", n_pos, n_tot, 100 * n_pos / n_tot))
 
-# クラスターアノテーションが存在すればクラスター別に集計
-cluster_cols <- c("cluster", "ClusterID", "cell_type", "CellType", "seurat_clusters",
-                  "leiden", "louvain", "Cluster", "cluster_label", "subtype")
-cluster_col  <- cluster_cols[cluster_cols %in% colnames(seurat_obj@meta.data)][1]
+# ---- クラスター情報の推定 ----
+# GSE165805のファイル名には細胞タイプが含まれる (例: _Cd, _InP)
+# 細胞名のプレフィックスからクラスターを推定
+cell_names <- colnames(norm_mat)
 
-if (!is.na(cluster_col)) {
-  message("クラスター列を使用: ", cluster_col)
-  seurat_obj$cluster_id <- seurat_obj@meta.data[[cluster_col]]
+# ファイル由来のクラスターラベルを付与
+cluster_from_file <- sub("_[^_]+$", "",   # 最後の_以降（細胞番号）を除く
+                         sub("^GSE165805_GEO_processed_data_", "", cell_names))
 
-  # クラスター別Gpr176陽性率
-  cluster_summary <- seurat_obj@meta.data %>%
-    dplyr::group_by(cluster_id) %>%
-    dplyr::summarise(
-      n_cells       = dplyr::n(),
-      n_gpr176_pos  = sum(Gpr176_positive),
-      pct_gpr176    = 100 * mean(Gpr176_positive),
-      mean_gpr176   = mean(Gpr176_expr),
-      .groups = "drop"
-    ) %>%
-    dplyr::arrange(dplyr::desc(pct_gpr176))
-
-  write.csv(cluster_summary,
-            file.path(OUT_DIR, "cluster_Gpr176_summary.csv"),
-            row.names = FALSE)
-  message("クラスター別Gpr176陽性率 (上位10):")
-  print(head(cluster_summary, 10))
-
-  # Gpr176陽性率 > 10% のクラスターを「Gpr176陽性クラスター」とする
-  gpr176_pos_clusters <- cluster_summary %>%
-    dplyr::filter(pct_gpr176 > 10) %>%
-    dplyr::pull(cluster_id)
-
-  if (length(gpr176_pos_clusters) == 0) {
-    # 閾値を下げて上位5クラスターを採用
-    gpr176_pos_clusters <- cluster_summary$cluster_id[1:min(5, nrow(cluster_summary))]
-    message("⚠ 陽性率10%超クラスターなし。上位5クラスターを使用: ",
-            paste(gpr176_pos_clusters, collapse = ", "))
-  } else {
-    message("Gpr176陽性クラスター (陽性率>10%): ",
-            paste(gpr176_pos_clusters, collapse = ", "))
-  }
-
-  seurat_obj$Gpr176_cluster <- ifelse(
-    seurat_obj$cluster_id %in% gpr176_pos_clusters, "Gpr176_positive", "Gpr176_negative"
-  )
-
+# ファイルが1つの場合は列名（細胞名）からクラスターを推定
+if (length(xlsx_files) > 1) {
+  cluster_labels <- cluster_from_file
+  message("クラスター（ファイル由来）: ", paste(unique(cluster_labels), collapse = ", "))
 } else {
-  message("クラスターアノテーションが見つかりません。細胞単位で陽性/陰性を使用します")
-  seurat_obj$cluster_id    <- NA
-  seurat_obj$Gpr176_cluster <- ifelse(seurat_obj$Gpr176_positive, "Gpr176_positive", "Gpr176_negative")
+  # 単一ファイル: 細胞名にクラスター情報が含まれていることが多い
+  # 例: "AAACCTGAGAAACGCC-1_Granule" -> "Granule"
+  cluster_try <- sub(".*_", "", cell_names)
+  if (length(unique(cluster_try)) > 1 && length(unique(cluster_try)) < n_tot * 0.5) {
+    cluster_labels <- cluster_try
+    message("クラスター（細胞名末尾）: ", paste(head(unique(cluster_labels), 10), collapse = ", "))
+  } else {
+    # クラスター情報なし: Gpr176の発現量でビン分け
+    cluster_labels <- rep("all_cells", n_tot)
+    message("クラスター情報なし: 細胞単位でGpr176陽性/陰性を使用")
+  }
 }
 
-# ---- Step 7: GnazとRGS16の発現量を抽出 ----
-message("\n=== Step 7: GnazおよびRGS16の発現量解析 ===")
+# ---- クラスター別Gpr176陽性率 ----
+meta_df <- data.frame(
+  cell            = cell_names,
+  cluster         = cluster_labels,
+  Gpr176_expr     = gpr176_exp,
+  Gpr176_positive = gpr176_positive,
+  stringsAsFactors = FALSE
+)
 
-target_genes <- found_genes[names(found_genes) %in% c("Gnaz", "Rgs16")]
+cluster_summary <- meta_df %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::summarise(
+    n_cells      = dplyr::n(),
+    n_gpr176_pos = sum(Gpr176_positive),
+    pct_gpr176   = 100 * mean(Gpr176_positive),
+    mean_gpr176  = mean(Gpr176_expr),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(dplyr::desc(pct_gpr176))
 
-for (gname in names(target_genes)) {
-  actual_name <- target_genes[gname]
-  seurat_obj@meta.data[[paste0(gname, "_expr")]] <- as.numeric(norm_data[actual_name, ])
+write.csv(cluster_summary,
+          file.path(OUT_DIR, "cluster_Gpr176_summary.csv"),
+          row.names = FALSE)
+message("\nクラスター別Gpr176陽性率:")
+print(as.data.frame(cluster_summary))
+
+# Gpr176陽性クラスターの定義
+pos_clusters <- cluster_summary$cluster[cluster_summary$pct_gpr176 > POS_PCT_THR]
+
+if (length(pos_clusters) == 0) {
+  # 閾値を下げて最高陽性率クラスターを採用
+  pos_clusters <- cluster_summary$cluster[1]
+  message(sprintf("⚠ 陽性率%d%%超クラスターなし → 最高陽性率クラスターを使用: %s",
+                  POS_PCT_THR, pos_clusters))
+} else {
+  message("Gpr176陽性クラスター (>", POS_PCT_THR, "%): ",
+          paste(pos_clusters, collapse = ", "))
 }
 
-# 統計サマリー（Gpr176陽性 vs 陰性）
+meta_df$Gpr176_cluster <- ifelse(meta_df$cluster %in% pos_clusters,
+                                  "Gpr176_positive", "Gpr176_negative")
+
+# ================================================================
+# Step 6: GnazとRGS16の発現量解析
+# ================================================================
+message("\n=== Step 6: Gnaz・RGS16の発現量解析 ===")
+
+target_genes <- gene_map[names(gene_map) %in% c("Gnaz", "Rgs16")]
+target_genes <- target_genes[!is.na(target_genes)]
+
 result_rows <- list()
 for (gname in names(target_genes)) {
-  expr_col <- paste0(gname, "_expr")
-  pos_vals <- seurat_obj@meta.data[seurat_obj$Gpr176_cluster == "Gpr176_positive", expr_col]
-  neg_vals <- seurat_obj@meta.data[seurat_obj$Gpr176_cluster == "Gpr176_negative", expr_col]
+  actual  <- target_genes[gname]
+  expr    <- as.numeric(norm_mat[actual, ])
 
-  wt <- wilcox.test(pos_vals, neg_vals, alternative = "greater")
-  pct_pos <- 100 * mean(pos_vals > 0)
-  pct_neg <- 100 * mean(neg_vals > 0)
+  pos_vals <- expr[meta_df$Gpr176_cluster == "Gpr176_positive"]
+  neg_vals <- expr[meta_df$Gpr176_cluster == "Gpr176_negative"]
+
+  wt       <- wilcox.test(pos_vals, neg_vals, alternative = "greater")
+  pct_pos  <- 100 * mean(pos_vals > 0)
+  pct_neg  <- 100 * mean(neg_vals > 0)
+  log2fc   <- log2((mean(pos_vals) + 1e-6) / (mean(neg_vals) + 1e-6))
+  sig      <- dplyr::case_when(wt$p.value < 0.001 ~ "***",
+                               wt$p.value < 0.01  ~ "**",
+                               wt$p.value < 0.05  ~ "*",
+                               TRUE               ~ "ns")
 
   result_rows[[gname]] <- data.frame(
-    gene         = gname,
-    actual_name  = target_genes[gname],
-    mean_Gpr176pos = round(mean(pos_vals), 4),
-    mean_Gpr176neg = round(mean(neg_vals), 4),
+    gene              = gname,
+    actual_name       = actual,
+    mean_Gpr176pos    = round(mean(pos_vals), 4),
+    mean_Gpr176neg    = round(mean(neg_vals), 4),
     pct_expressed_pos = round(pct_pos, 2),
     pct_expressed_neg = round(pct_neg, 2),
-    log2FC       = round(log2((mean(pos_vals) + 1e-6) / (mean(neg_vals) + 1e-6)), 4),
-    wilcox_pval  = signif(wt$p.value, 4),
-    stringsAsFactors = FALSE
+    log2FC            = round(log2fc, 4),
+    wilcox_pval       = signif(wt$p.value, 4),
+    significance      = sig,
+    stringsAsFactors  = FALSE
   )
 
-  message(sprintf("\n[%s (%s)] Gpr176+ クラスター vs Gpr176- クラスター", gname, actual_name))
-  message(sprintf("  平均発現量: %.4f vs %.4f", mean(pos_vals), mean(neg_vals)))
-  message(sprintf("  発現細胞率: %.1f%% vs %.1f%%", pct_pos, pct_neg))
-  message(sprintf("  log2FC: %.4f  Wilcoxon p値: %s", log2((mean(pos_vals)+1e-6)/(mean(neg_vals)+1e-6)), signif(wt$p.value,4)))
+  message(sprintf("\n[%s (%s)]", gname, actual))
+  message(sprintf("  Gpr176+: 平均=%.4f, 発現率=%.1f%%", mean(pos_vals), pct_pos))
+  message(sprintf("  Gpr176-: 平均=%.4f, 発現率=%.1f%%", mean(neg_vals), pct_neg))
+  message(sprintf("  log2FC=%.3f, Wilcoxon p=%s %s", log2fc, signif(wt$p.value, 4), sig))
 }
 
 result_df <- do.call(rbind, result_rows)
 write.csv(result_df,
           file.path(OUT_DIR, "Gnaz_RGS16_in_Gpr176clusters.csv"),
           row.names = FALSE)
-message("\n結果をCSVに保存: ", file.path(OUT_DIR, "Gnaz_RGS16_in_Gpr176clusters.csv"))
-print(result_df)
+message("\n結果CSV: ", file.path(OUT_DIR, "Gnaz_RGS16_in_Gpr176clusters.csv"))
 
-# ---- Step 8: 可視化 ----
-message("\n=== Step 8: 可視化 ===")
+# ================================================================
+# Step 7: 可視化
+# ================================================================
+message("\n=== Step 7: 可視化 ===")
 
-# 8-A: バイオリンプロット（Gpr176陽性 vs 陰性クラスターでの各遺伝子発現）
+all_plot_genes <- c("Gpr176", names(target_genes))
+colors_group <- c("Gpr176_positive" = "#E64B35", "Gpr176_negative" = "#4DBBD5")
+
+# --- 7-A: バイオリンプロット ---
 plot_list <- list()
-
-all_target <- c("Gpr176", names(target_genes))
-for (gname in all_target) {
-  actual <- if (gname == "Gpr176") gpr176_gene else target_genes[gname]
+for (gname in all_plot_genes) {
+  actual <- if (gname == "Gpr176") gpr176_key else target_genes[gname]
   if (is.na(actual)) next
 
-  expr_vals <- as.numeric(norm_data[actual, ])
-  plot_df <- data.frame(
-    expr    = expr_vals,
-    group   = seurat_obj$Gpr176_cluster,
+  expr_vec <- as.numeric(norm_mat[actual, ])
+  pdata <- data.frame(
+    expr  = expr_vec,
+    group = meta_df$Gpr176_cluster,
     stringsAsFactors = FALSE
   )
 
-  p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = group, y = expr, fill = group)) +
-    ggplot2::geom_violin(trim = FALSE, alpha = 0.7) +
-    ggplot2::geom_boxplot(width = 0.1, outlier.size = 0.3, fill = "white", alpha = 0.8) +
-    ggplot2::scale_fill_manual(values = c("Gpr176_positive" = "#E64B35",
-                                          "Gpr176_negative" = "#4DBBD5")) +
-    ggplot2::labs(title = sprintf("%s (%s)", gname, actual),
-                  x = NULL, y = "log(CP10K + 1)",
-                  subtitle = sprintf("Gpr176+ vs Gpr176- clusters")) +
+  p <- ggplot2::ggplot(pdata, ggplot2::aes(x = group, y = expr, fill = group)) +
+    ggplot2::geom_violin(trim = FALSE, alpha = 0.75) +
+    ggplot2::geom_boxplot(width = 0.1, outlier.size = 0.3,
+                          fill = "white", alpha = 0.8) +
+    ggplot2::scale_fill_manual(values = colors_group) +
+    ggplot2::scale_x_discrete(labels = c("Gpr176_positive" = "Gpr176+",
+                                         "Gpr176_negative" = "Gpr176-")) +
+    ggplot2::labs(title = sprintf("%s\n(%s)", gname, actual),
+                  x = NULL, y = "log(CP10K + 1)") +
     ggplot2::theme_classic(base_size = 12) +
     ggplot2::theme(legend.position = "none",
-                   plot.title = ggplot2::element_text(face = "bold"))
+                   plot.title = ggplot2::element_text(face = "bold", size = 11))
 
   plot_list[[gname]] <- p
 }
@@ -344,87 +339,97 @@ ggplot2::ggsave(file.path(OUT_DIR, "violin_Gnaz_RGS16_Gpr176clusters.png"),
                 combined_violin, width = 4 * length(plot_list), height = 5, dpi = 150)
 message("バイオリンプロット保存完了")
 
-# 8-B: クラスター別ドットプロット（クラスターアノテーションがある場合）
-if (!is.na(cluster_col) && length(gpr176_pos_clusters) > 0) {
+# --- 7-B: 発現率棒グラフ（p値注釈付き） ---
+bar_df <- result_df %>%
+  dplyr::select(gene, pct_expressed_pos, pct_expressed_neg) %>%
+  tidyr::pivot_longer(cols = c(pct_expressed_pos, pct_expressed_neg),
+                      names_to = "group", values_to = "pct") %>%
+  dplyr::mutate(group = dplyr::recode(group,
+                                      "pct_expressed_pos" = "Gpr176+ cluster",
+                                      "pct_expressed_neg" = "Gpr176- cluster"))
 
-  dot_genes <- c(gpr176_gene, unname(target_genes))
-  dot_genes <- dot_genes[!is.na(dot_genes)]
+bar_p <- ggplot2::ggplot(bar_df, ggplot2::aes(x = gene, y = pct, fill = group)) +
+  ggplot2::geom_col(position = "dodge", width = 0.6, color = "black", linewidth = 0.3) +
+  ggplot2::geom_text(data = result_df,
+                     ggplot2::aes(x = gene, y = pmax(pct_expressed_pos, pct_expressed_neg) + 3,
+                                  label = significance),
+                     inherit.aes = FALSE, size = 5, fontface = "bold") +
+  ggplot2::scale_fill_manual(values = c("Gpr176+ cluster" = "#E64B35",
+                                        "Gpr176- cluster" = "#4DBBD5")) +
+  ggplot2::labs(title = "Gpr176陽性クラスターにおけるGnaz・RGS16の発現細胞率",
+                subtitle = "Kozareva et al. 2021 (GSE165805)",
+                x = "遺伝子", y = "発現細胞率 (%)", fill = NULL) +
+  ggplot2::theme_classic(base_size = 13) +
+  ggplot2::theme(legend.position = "top")
 
-  # Gpr176陽性クラスター + 発現量上位5陰性クラスターに絞る
-  top_neg <- cluster_summary %>%
-    dplyr::filter(!cluster_id %in% gpr176_pos_clusters) %>%
-    dplyr::slice_head(n = 5) %>%
-    dplyr::pull(cluster_id)
+ggplot2::ggsave(file.path(OUT_DIR, "barplot_expression_pct.pdf"),
+                bar_p, width = 6, height = 5)
+ggplot2::ggsave(file.path(OUT_DIR, "barplot_expression_pct.png"),
+                bar_p, width = 6, height = 5, dpi = 150)
+message("棒グラフ保存完了")
 
-  show_clusters <- c(as.character(gpr176_pos_clusters), as.character(top_neg))
-  cells_to_show <- colnames(seurat_obj)[seurat_obj$cluster_id %in% show_clusters]
+# --- 7-C: クラスター別ドットプロット ---
+dot_genes_actual <- c(gpr176_key, unname(target_genes))
+dot_genes_actual <- dot_genes_actual[!is.na(dot_genes_actual)]
+dot_gene_labels  <- c("Gpr176", names(target_genes))[
+  !is.na(c(gpr176_key, unname(target_genes)))]
 
-  if (length(cells_to_show) > 1) {
-    sub_obj <- seurat_obj[, cells_to_show]
-    Idents(sub_obj) <- sub_obj$cluster_id
+dot_data <- lapply(unique(meta_df$cluster), function(cl) {
+  cl_cells <- meta_df$cell[meta_df$cluster == cl]
+  lapply(seq_along(dot_genes_actual), function(i) {
+    vals <- as.numeric(norm_mat[dot_genes_actual[i], cl_cells])
+    data.frame(cluster = cl,
+               gene    = dot_gene_labels[i],
+               mean    = mean(vals),
+               pct     = 100 * mean(vals > 0))
+  })
+})
+dot_df <- do.call(rbind, do.call(c, dot_data))
 
-    dp <- Seurat::DotPlot(sub_obj, features = dot_genes) +
-      ggplot2::coord_flip() +
-      ggplot2::labs(title = "Gpr176 / Gnaz / Rgs16 発現（上位クラスター）",
-                    x = "遺伝子", y = "クラスター") +
-      ggplot2::theme_classic(base_size = 11) +
-      viridis::scale_color_viridis(option = "plasma")
+dot_p <- ggplot2::ggplot(dot_df,
+         ggplot2::aes(x = gene, y = cluster,
+                      size = pct, color = mean)) +
+  ggplot2::geom_point() +
+  viridis::scale_color_viridis(option = "plasma", name = "平均発現量\nlog(CP10K+1)") +
+  ggplot2::scale_size_continuous(range = c(1, 8), name = "発現細胞率 (%)") +
+  ggplot2::labs(title = "Gpr176 / Gnaz / Rgs16 発現（クラスター別）",
+                subtitle = "Kozareva et al. 2021 (GSE165805)",
+                x = "遺伝子", y = "クラスター") +
+  ggplot2::theme_classic(base_size = 11) +
+  ggplot2::theme(axis.text.x = ggplot2::element_text(face = "italic"))
 
-    ggplot2::ggsave(file.path(OUT_DIR, "dotplot_Gpr176_Gnaz_RGS16.pdf"),
-                    dp, width = 10, height = 5)
-    ggplot2::ggsave(file.path(OUT_DIR, "dotplot_Gpr176_Gnaz_RGS16.png"),
-                    dp, width = 10, height = 5, dpi = 150)
-    message("ドットプロット保存完了")
-  }
-}
+ggplot2::ggsave(file.path(OUT_DIR, "dotplot_Gpr176_Gnaz_RGS16.pdf"),
+                dot_p, width = max(5, length(dot_genes_actual) * 2),
+                height = max(4, length(unique(meta_df$cluster)) * 0.5 + 2))
+ggplot2::ggsave(file.path(OUT_DIR, "dotplot_Gpr176_Gnaz_RGS16.png"),
+                dot_p, width = max(5, length(dot_genes_actual) * 2),
+                height = max(4, length(unique(meta_df$cluster)) * 0.5 + 2),
+                dpi = 150)
+message("ドットプロット保存完了")
 
-# 8-C: Gpr176陽性クラスターにおけるGnaz・RGS16の発現率の棒グラフ
-if (nrow(result_df) > 0) {
-  bar_df <- result_df %>%
-    dplyr::select(gene, pct_expressed_pos, pct_expressed_neg) %>%
-    tidyr::pivot_longer(cols = c(pct_expressed_pos, pct_expressed_neg),
-                        names_to = "group", values_to = "pct") %>%
-    dplyr::mutate(group = dplyr::recode(group,
-                                        "pct_expressed_pos" = "Gpr176+ cluster",
-                                        "pct_expressed_neg" = "Gpr176- cluster"))
-
-  bar_p <- ggplot2::ggplot(bar_df, ggplot2::aes(x = gene, y = pct, fill = group)) +
-    ggplot2::geom_col(position = "dodge", width = 0.6) +
-    ggplot2::scale_fill_manual(values = c("Gpr176+ cluster" = "#E64B35",
-                                          "Gpr176- cluster" = "#4DBBD5")) +
-    ggplot2::labs(title = "Gpr176陽性クラスターにおける発現細胞率",
-                  x = "遺伝子", y = "発現細胞率 (%)", fill = NULL) +
-    ggplot2::theme_classic(base_size = 13) +
-    ggplot2::theme(legend.position = "top")
-
-  ggplot2::ggsave(file.path(OUT_DIR, "barplot_expression_pct.pdf"),
-                  bar_p, width = 6, height = 5)
-  ggplot2::ggsave(file.path(OUT_DIR, "barplot_expression_pct.png"),
-                  bar_p, width = 6, height = 5, dpi = 150)
-  message("棒グラフ保存完了")
-}
-
-# ---- 最終サマリー ----
-message("\n========================================")
-message("         解析完了サマリー")
-message("========================================")
+# ================================================================
+# 最終サマリー
+# ================================================================
+message("\n", strrep("=", 52))
+message("           解析完了サマリー")
+message(strrep("=", 52))
 message(sprintf("データセット : %s (Kozareva et al. 2021)", GEO_ID))
-message(sprintf("総細胞数     : %d", ncol(seurat_obj)))
+message(sprintf("総細胞数     : %d", n_tot))
 message(sprintf("Gpr176陽性   : %d 細胞 (%.1f%%)", n_pos, 100 * n_pos / n_tot))
+message(sprintf("陽性クラスター: %s", paste(pos_clusters, collapse = ", ")))
 message("")
 message("Gpr176陽性クラスターでの発現:")
 for (i in seq_len(nrow(result_df))) {
   r <- result_df[i, ]
-  sig <- if (r$wilcox_pval < 0.001) "***" else if (r$wilcox_pval < 0.01) "**" else if (r$wilcox_pval < 0.05) "*" else "ns"
-  message(sprintf("  %s: 発現率 %.1f%% (vs %.1f%%), log2FC=%.2f, p=%s %s",
+  message(sprintf("  %-6s: 発現率 %5.1f%% (vs %5.1f%%)  log2FC=%+.2f  p=%s %s",
                   r$gene, r$pct_expressed_pos, r$pct_expressed_neg,
-                  r$log2FC, r$wilcox_pval, sig))
+                  r$log2FC, r$wilcox_pval, r$significance))
 }
 message("")
-message(sprintf("出力フォルダ : %s/", OUT_DIR))
-message("  - cluster_Gpr176_summary.csv")
-message("  - Gnaz_RGS16_in_Gpr176clusters.csv")
-message("  - violin_Gnaz_RGS16_Gpr176clusters.pdf/png")
-message("  - dotplot_Gpr176_Gnaz_RGS16.pdf/png")
-message("  - barplot_expression_pct.pdf/png")
-message("========================================")
+message("出力フォルダ: ", OUT_DIR, "/")
+message("  cluster_Gpr176_summary.csv")
+message("  Gnaz_RGS16_in_Gpr176clusters.csv")
+message("  violin_Gnaz_RGS16_Gpr176clusters.pdf/png")
+message("  dotplot_Gpr176_Gnaz_RGS16.pdf/png")
+message("  barplot_expression_pct.pdf/png")
+message(strrep("=", 52))
