@@ -119,11 +119,11 @@ if (!is.null(MANUAL_MTX)) {
 
   # (B) mtx + barcodes + genes（拡張子なしも対応）
   mtx_file  <- find_file(all_files, c("\\.mtx(\\.gz)?$"))
-  bar_file  <- find_file(all_files, c("barcodes(\\.tsv)?(\\.gz)?$",
-                                      "barcodes$"))
-  feat_file <- find_file(all_files, c("genes(\\.tsv)?(\\.gz)?$",
-                                      "features(\\.tsv)?(\\.gz)?$",
-                                      "genes$", "features$"))
+  bar_file  <- find_file(all_files, c("barcodes(\\.tsv|\\.txt)?(\\.gz)?$",
+                                      "barcodes(\\.txt)?$"))
+  feat_file <- find_file(all_files, c("genes(\\.tsv|\\.txt)?(\\.gz)?$",
+                                      "features(\\.tsv|\\.txt)?(\\.gz)?$",
+                                      "genes(\\.txt)?$", "features(\\.txt)?$"))
 }
 
 if (is.null(seurat_obj) && !is.null(mtx_file) && !is.null(bar_file) && !is.null(feat_file)) {
@@ -133,9 +133,9 @@ if (is.null(seurat_obj) && !is.null(mtx_file) && !is.null(bar_file) && !is.null(
   message("  genes    : ", basename(feat_file))
 
   if (has_seurat) {
-    counts <- Seurat::ReadMtx(mtx      = mtx_file,
-                              cells    = bar_file,
-                              features = feat_file,
+    counts <- Seurat::ReadMtx(mtx      = normalizePath(mtx_file),
+                              cells    = normalizePath(bar_file),
+                              features = normalizePath(feat_file),
                               feature.column = 1)   # 遺伝子名が1列目の場合
     seurat_obj <- Seurat::CreateSeuratObject(counts = counts,
                                              project = "GSE165371")
