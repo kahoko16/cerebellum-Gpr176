@@ -127,28 +127,100 @@ if (!is.null(MANUAL_MTX)) {
 }
 
 if (is.null(seurat_obj) && !is.null(mtx_file) && !is.null(bar_file) && !is.null(feat_file)) {
-  message("10x形式を読み込み中...")
+  message("10x形式を読み込み中（対象遺伝子のみ抽出・メモリ節約モード）...")
   message("  mtx      : ", basename(mtx_file))
   message("  barcodes : ", basename(bar_file))
   message("  genes    : ", basename(feat_file))
 
-  if (has_seurat) {
-    counts <- Seurat::ReadMtx(mtx      = normalizePath(mtx_file),
-                              cells    = normalizePath(bar_file),
-                              features = normalizePath(feat_file),
-                              feature.column = 1)   # 遺伝子名が1列目の場合
-    seurat_obj <- Seurat::CreateSeuratObject(counts = counts,
-                                             project = "GSE165371")
-  } else {
-    mat        <- Matrix::readMM(mtx_file)
-    barcodes   <- read.table(bar_file,  header = FALSE)[[1]]
-    features   <- read.table(feat_file, header = FALSE, sep = "\t")
-    gene_names <- if (ncol(features) >= 2) features[[2]] else features[[1]]
-    rownames(mat) <- gene_names
-    colnames(mat) <- barcodes
-    seurat_obj <- list(counts = mat, meta = data.frame(row.names = barcodes))
+  # 遺伝子リストを読み込む（軽い）
+  features   <- read.table(normalizePath(feat_file),
+                           header = FALSE, sep = "\t",
+                           stringsAsFactors = FALSE)
+  gene_names <- if (ncol(features) >= 2) features[[2]] else features[[1]]
+  barcodes   <- read.table(normalizePath(bar_file),
+                           header = FALSE, stringsAsFactors = FALSE)[[1]]
+  message("  総遺伝子数: ", length(gene_names))
+  message("  総細胞数  : ", length(barcodes))
+
+  # 対象遺伝子の行インデックスを特定
+  target_idx <- which(tolower(gene_names) %in% tolower(GENES_OF_INT))
+  found_names <- gene_names[target_idx]
+  message("  抽出遺伝子: ", paste(found_names, collapse = ", "),
+          " (行インデックス: ", paste(target_idx, collapse = ", "), ")")
+
+  if (length(target_idx) == 0)
+    stop("対象遺伝子（", paste(GENES_OF_INT, collapse = ", "),
+         "）がgenesファイルに見つかりません。")
+
+  # mtxファイルをスキャンして対象遺伝子の行のみ取り込む
+  message("  mtxファイルをスキャン中（数分かかります）...")
+
+  # mtxは .gz の場合 gzcon で開く
+  open_mtx <- function(f) {
+    if (grepl("\\.gz$", f)) gzcon(file(normalizePath(f), "rb")) else file(normalizePath(f), "r")
   }
-  message("読み込み完了: ", ncol(seurat_obj), " 細胞")
+  con <- open_mtx(mtx_file)
+  on.exit(close(con), add = TRUE)
+
+  # ヘッダー行をスキップ（%で始まる行）
+  repeat {
+    line <- readLines(con, n = 1)
+    if (!startsWith(line, "%")) break
+  }
+  # 次の行: nrow ncol nnz
+  dims    <- as.integer(strsplit(trimws(line), "\\s+")[[1]])
+  n_genes <- dims[1]; n_cells <- dims[2]; nnz <- dims[3]
+  message(sprintf("  行列次元: %d 遺伝子 × %d 細胞, 非ゼロ要素: %d",
+                  n_genes, n_cells, nnz))
+
+  # 対象遺伝子の非ゼロ要素を収集
+  rows_list <- vector("list", length(target_idx))
+  names(rows_list) <- as.character(target_idx)
+  for (i in seq_along(target_idx))
+    rows_list[[i]] <- list(col = integer(0), val = numeric(0))
+
+  chunk <- 1e6L
+  read_so_far <- 0L
+  repeat {
+    lines <- readLines(con, n = chunk)
+    if (length(lines) == 0) break
+    read_so_far <- read_so_far + length(lines)
+    if (read_so_far %% 5e6 == 0)
+      message(sprintf("    %.0f%% スキャン済み...", 100 * read_so_far / nnz))
+
+    # 数値に変換
+    spl <- strsplit(lines, " ", fixed = TRUE)
+    mat_chunk <- matrix(as.numeric(unlist(spl, use.names = FALSE)),
+                        ncol = 3, byrow = TRUE)
+    for (ti in seq_along(target_idx)) {
+      keep <- mat_chunk[, 1] == target_idx[ti]
+      if (any(keep)) {
+        rows_list[[ti]]$col <- c(rows_list[[ti]]$col, as.integer(mat_chunk[keep, 2]))
+        rows_list[[ti]]$val <- c(rows_list[[ti]]$val, mat_chunk[keep, 3])
+      }
+    }
+  }
+  message("  スキャン完了")
+
+  # スパース行列を構築
+  count_list <- lapply(seq_along(target_idx), function(ti) {
+    Matrix::sparseMatrix(
+      i = rep(1L, length(rows_list[[ti]]$col)),
+      j = rows_list[[ti]]$col,
+      x = rows_list[[ti]]$val,
+      dims = c(1L, length(barcodes)),
+      dimnames = list(found_names[ti], barcodes)
+    )
+  })
+  counts <- do.call(rbind, count_list)
+  message("  行列構築完了: ", nrow(counts), " 遺伝子 × ", ncol(counts), " 細胞")
+
+  seurat_obj <- list(
+    counts = counts,
+    meta   = data.frame(row.names = barcodes,
+                        cell      = barcodes)
+  )
+  message("読み込み完了")
 }
 
 # (C) h5
@@ -227,13 +299,15 @@ if (has_seurat && inherits(seurat_obj, "Seurat")) {
                                       scale.factor = 1e4,
                                       verbose = FALSE)
   norm_mat <- Seurat::GetAssayData(seurat_obj, slot = "data")
+  message("LogNormalize完了（log(CP10K + 1)）")
 } else {
-  mat <- seurat_obj$counts
-  col_sums <- Matrix::colSums(mat)
-  norm_mat  <- Matrix::t(Matrix::t(mat) / (col_sums / 1e4))
-  norm_mat  <- log1p(norm_mat)
+  # メモリ節約モード: 3遺伝子のみ読み込んでいるため
+  # ライブラリサイズが不明 → 生UMIカウントをそのまま使用
+  # （発現の有無＝UMI > 0 で判定するため正規化なしでも正確）
+  norm_mat <- seurat_obj$counts
+  message("生UMIカウントを使用（3遺伝子のみ読み込みのためライブラリサイズ正規化は省略）")
+  message("※ 発現の有無（UMI > 0）および平均UMI数で比較します")
 }
-message("LogNormalize完了（log(CP10K + 1)）")
 
 # ================================================================
 # Step 5: 対象遺伝子の確認
