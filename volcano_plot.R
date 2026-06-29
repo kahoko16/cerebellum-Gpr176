@@ -59,7 +59,8 @@ compute_results <- function(ko_mat, wt_mat) {
     )
   }, numeric(1))
 
-  padj <- p.adjust(pvals, method = "BH")
+  # n=2のためBH補正は使わず raw p値を使用
+  padj <- pvals
 
   res <- data.frame(
     probe_id    = probe_ids,
@@ -107,12 +108,12 @@ draw_volcano <- function(res, title_label) {
     scale_color_manual(values = color_map, name = NULL) +
     labs(
       title    = sprintf("Volcano Plot: KO vs WT  [%s]", title_label),
-      subtitle = sprintf("FC > %.1fx  |  FDR < %.2f  |  Up: %d  Down: %d",
+      subtitle = sprintf("FC > %.1fx  |  p < %.2f (raw, n=2)  |  Up: %d  Down: %d",
                          FC_CUTOFF, PVAL_CUTOFF,
                          sum(res$sig == "Up in KO"),
                          sum(res$sig == "Down in KO")),
       x = expression(log[2]~"(KO / WT)"),
-      y = expression(-log[10]~"(adjusted p-value)")
+      y = expression(-log[10]~"(p-value, raw)")
     ) +
     theme_classic(base_size = 13) +
     theme(
