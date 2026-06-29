@@ -79,21 +79,39 @@ read_geo_excel <- function(path) {
   message("  シート: ", paste(sheets, collapse = ", "))
 
   df <- as.data.frame(
-    readxl::read_excel(path, sheet = sheets[1], col_names = TRUE)
+    readxl::read_excel(path, sheet = sheets[1], col_names = TRUE),
+    stringsAsFactors = FALSE
   )
+  message(sprintf("  読込直後: %d 行 × %d 列", nrow(df), ncol(df)))
+  message("  列1-3の型: ", paste(sapply(df[, seq_len(min(3, ncol(df)))], class), collapse = ", "))
 
-  # 1列目が文字列ならそれを行名（遺伝子名）に使う
-  if (is.character(df[[1]]) || is.factor(df[[1]])) {
-    rownames(df) <- make.unique(as.character(df[[1]]))
-    df <- df[, -1, drop = FALSE]
+  # 文字列列を特定
+  is_char <- vapply(df, function(x) is.character(x) || is.factor(x), logical(1L))
+  char_cols <- which(is_char)
+  num_cols  <- which(!is_char)
+
+  # 文字列列が1列だけ → 遺伝子名列と判断
+  if (length(char_cols) == 1) {
+    gene_names <- make.unique(as.character(df[[char_cols]]))
+    df <- df[, num_cols, drop = FALSE]
+  # 文字列列が複数 → 1列目だけ遺伝子名として使う
+  } else if (length(char_cols) >= 1) {
+    gene_names <- make.unique(as.character(df[[char_cols[1]]]))
+    df <- df[, num_cols, drop = FALSE]
+  } else {
+    # 文字列列なし: 行名をそのまま使う
+    gene_names <- rownames(df)
   }
 
-  # 数値列のみ残す（vapplyでリスト返りを防ぐ）
-  is_num <- vapply(df, is.numeric, logical(1L))
-  df <- df[, is_num, drop = FALSE]
-
-  storage.mode(df) <- "double"
-  as.matrix(df)
+  # 数値行列に変換（dimnames を明示的に設定）
+  mat <- matrix(
+    as.double(unlist(df, use.names = FALSE)),
+    nrow     = nrow(df),
+    ncol     = ncol(df),
+    dimnames = list(gene_names, colnames(df))
+  )
+  message(sprintf("  行列サイズ: %d 遺伝子 × %d 細胞", nrow(mat), ncol(mat)))
+  mat
 }
 
 mat_list <- lapply(xlsx_files, function(f) {
