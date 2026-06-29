@@ -78,38 +78,33 @@ read_geo_excel <- function(path) {
   sheets <- readxl::excel_sheets(path)
   message("  シート: ", paste(sheets, collapse = ", "))
 
-  df <- as.data.frame(
-    readxl::read_excel(path, sheet = sheets[1], col_names = TRUE),
-    stringsAsFactors = FALSE
-  )
+  # guess_max を大きくして型推定を正確に
+  tbl <- readxl::read_excel(path, sheet = sheets[1],
+                             col_names = TRUE, guess_max = 5000)
+  df  <- as.data.frame(tbl, stringsAsFactors = FALSE)
   message(sprintf("  読込直後: %d 行 × %d 列", nrow(df), ncol(df)))
-  message("  列1-3の型: ", paste(sapply(df[, seq_len(min(3, ncol(df)))], class), collapse = ", "))
 
-  # 文字列列を特定
-  is_char <- vapply(df, function(x) is.character(x) || is.factor(x), logical(1L))
-  char_cols <- which(is_char)
-  num_cols  <- which(!is_char)
+  # 文字列列（遺伝子名列）を除去し遺伝子名として保存
+  is_char    <- vapply(df, function(x) is.character(x) || is.factor(x), logical(1L))
+  char_idx   <- which(is_char)
+  num_idx    <- which(!is_char)
 
-  # 文字列列が1列だけ → 遺伝子名列と判断
-  if (length(char_cols) == 1) {
-    gene_names <- make.unique(as.character(df[[char_cols]]))
-    df <- df[, num_cols, drop = FALSE]
-  # 文字列列が複数 → 1列目だけ遺伝子名として使う
-  } else if (length(char_cols) >= 1) {
-    gene_names <- make.unique(as.character(df[[char_cols[1]]]))
-    df <- df[, num_cols, drop = FALSE]
+  if (length(char_idx) >= 1) {
+    gene_names <- make.unique(as.character(df[[char_idx[1]]]))
   } else {
-    # 文字列列なし: 行名をそのまま使う
-    gene_names <- rownames(df)
+    gene_names <- as.character(seq_len(nrow(df)))
   }
+  df_num <- df[, num_idx, drop = FALSE]
+  cell_names <- colnames(df_num)
 
-  # 数値行列に変換（dimnames を明示的に設定）
-  mat <- matrix(
-    as.double(unlist(df, use.names = FALSE)),
-    nrow     = nrow(df),
-    ncol     = ncol(df),
-    dimnames = list(gene_names, colnames(df))
-  )
+  message(sprintf("  数値列数（細胞数）: %d", ncol(df_num)))
+
+  # 列ごとにas.doubleして行列化（unlistを使わない）
+  mat <- vapply(df_num, as.double, double(nrow(df_num)))
+  # vapplyの返り値は nrow x ncol の行列
+  rownames(mat) <- gene_names
+  colnames(mat) <- cell_names
+
   message(sprintf("  行列サイズ: %d 遺伝子 × %d 細胞", nrow(mat), ncol(mat)))
   mat
 }
