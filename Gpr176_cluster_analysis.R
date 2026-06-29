@@ -78,18 +78,21 @@ read_geo_excel <- function(path) {
   sheets <- readxl::excel_sheets(path)
   message("  シート: ", paste(sheets, collapse = ", "))
 
-  # シートが1つなら直接読む、複数なら最初のシートを使用
-  # GEO processed data: 行=遺伝子, 列=細胞 が多い
-  df <- readxl::read_excel(path, sheet = sheets[1], col_names = TRUE)
-  df <- as.data.frame(df)
+  df <- as.data.frame(
+    readxl::read_excel(path, sheet = sheets[1], col_names = TRUE)
+  )
 
-  # 1列目が遺伝子名かどうか確認
+  # 1列目が文字列ならそれを行名（遺伝子名）に使う
   if (is.character(df[[1]]) || is.factor(df[[1]])) {
-    rownames(df) <- df[[1]]
+    rownames(df) <- make.unique(as.character(df[[1]]))
     df <- df[, -1, drop = FALSE]
   }
-  # 数値列のみ残す
-  df <- df[, sapply(df, is.numeric), drop = FALSE]
+
+  # 数値列のみ残す（vapplyでリスト返りを防ぐ）
+  is_num <- vapply(df, is.numeric, logical(1L))
+  df <- df[, is_num, drop = FALSE]
+
+  storage.mode(df) <- "double"
   as.matrix(df)
 }
 
