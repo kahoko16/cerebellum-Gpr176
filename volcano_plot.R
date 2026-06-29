@@ -148,24 +148,55 @@ message("Saved: volcano_CT6_CT18_combined.pdf")
 
 print(combined)
 
-# ---- CT6・CT18 共通遺伝子の抽出 ----
-sig6  <- res_ct6[res_ct6$sig  != "NS", c("probe_id", "gene_symbol", "log2FC", "pval", "sig")]
-sig18 <- res_ct18[res_ct18$sig != "NS", c("probe_id", "gene_symbol", "log2FC", "pval", "sig")]
+# ---- 網羅的統合リスト（CT6・CT18全プローブをマージ） ----
+# CT6とCT18の結果を全プローブで横並びにする
+all6  <- res_ct6[,  c("probe_id", "gene_symbol", "log2FC", "pval", "sig")]
+all18 <- res_ct18[, c("probe_id", "gene_symbol", "log2FC", "pval", "sig")]
+colnames(all6)  <- c("probe_id", "gene_symbol", "log2FC_CT6",  "pval_CT6",  "sig_CT6")
+colnames(all18) <- c("probe_id", "gene_symbol", "log2FC_CT18", "pval_CT18", "sig_CT18")
 
-colnames(sig6)  <- c("probe_id", "gene_symbol", "log2FC_CT6",  "pval_CT6",  "sig_CT6")
-colnames(sig18) <- c("probe_id", "gene_symbol", "log2FC_CT18", "pval_CT18", "sig_CT18")
+merged <- merge(all6, all18, by = c("probe_id", "gene_symbol"))
 
-common <- merge(sig6, sig18, by = c("probe_id", "gene_symbol"))
+# CT6・CT18それぞれでのUp/Down判定
+merged$up_CT6   <- merged$sig_CT6  == "Up in KO"
+merged$up_CT18  <- merged$sig_CT18 == "Up in KO"
+merged$down_CT6 <- merged$sig_CT6  == "Down in KO"
+merged$down_CT18<- merged$sig_CT18 == "Down in KO"
 
-# 同方向（両方ともUp or 両方ともDown）のみ
-common_same <- common[common$sig_CT6 == common$sig_CT18, ]
-common_same <- common_same[order(common_same$pval_CT6), ]
+# カテゴリ分類
+merged$category <- "NS"
+merged$category[merged$up_CT6   & merged$up_CT18  ] <- "Up_both"
+merged$category[merged$down_CT6 & merged$down_CT18] <- "Down_both"
+merged$category[merged$up_CT6   & !merged$up_CT18 & !merged$down_CT18] <- "Up_CT6only"
+merged$category[merged$up_CT18  & !merged$up_CT6  & !merged$down_CT6 ] <- "Up_CT18only"
+merged$category[merged$down_CT6 & !merged$down_CT18& !merged$up_CT18 ] <- "Down_CT6only"
+merged$category[merged$down_CT18& !merged$down_CT6 & !merged$up_CT6  ] <- "Down_CT18only"
 
-write.csv(common_same, "common_CT6_CT18.csv", row.names = FALSE)
-message(sprintf("Saved: common_CT6_CT18.csv  (%d probes)", nrow(common_same)))
+# pval_mean（CT6・CT18の幾何平均）でソート
+merged$pval_mean <- sqrt(merged$pval_CT6 * merged$pval_CT18)
 
-# サマリー表示
-message(sprintf("  共通Up   (KOで上昇): %d", sum(common_same$sig_CT6 == "Up in KO")))
-message(sprintf("  共通Down (KOで低下): %d", sum(common_same$sig_CT6 == "Down in KO")))
-message("\n--- 共通遺伝子 Top20 ---")
-print(head(common_same[, c("gene_symbol", "log2FC_CT6", "log2FC_CT18", "pval_CT6", "pval_CT18", "sig_CT6")], 20))
+# 全遺伝子テーブル保存
+out_cols <- c("probe_id", "gene_symbol",
+              "log2FC_CT6", "pval_CT6", "sig_CT6",
+              "log2FC_CT18", "pval_CT18", "sig_CT18",
+              "category", "pval_mean")
+write.csv(merged[order(merged$pval_mean), out_cols], "all_genes_CT6_CT18.csv", row.names = FALSE)
+message(sprintf("Saved: all_genes_CT6_CT18.csv  (%d probes total)", nrow(merged)))
+
+# ---- Up遺伝子リスト（リガンド候補） ----
+up_genes <- merged[merged$category %in% c("Up_both", "Up_CT6only", "Up_CT18only"), ]
+up_genes <- up_genes[order(up_genes$pval_mean), out_cols]
+
+write.csv(up_genes, "up_genes_KO_comprehensive.csv", row.names = FALSE)
+message(sprintf("Saved: up_genes_KO_comprehensive.csv  (%d probes)", nrow(up_genes)))
+
+# サマリー
+message("\n===== Up遺伝子 サマリー（リガンド候補） =====")
+message(sprintf("  CT6・CT18 両方でUp : %d", sum(merged$category == "Up_both")))
+message(sprintf("  CT6のみでUp        : %d", sum(merged$category == "Up_CT6only")))
+message(sprintf("  CT18のみでUp       : %d", sum(merged$category == "Up_CT18only")))
+message(sprintf("  合計               : %d", nrow(up_genes)))
+
+message("\n--- Up遺伝子 Top30（pval_meanでソート） ---")
+print(head(up_genes[, c("gene_symbol", "log2FC_CT6", "log2FC_CT18",
+                         "pval_CT6", "pval_CT18", "category")], 30))
