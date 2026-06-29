@@ -1,29 +1,37 @@
-# Volcano plot: KO vs WT (CT6 + CT18 統合, n=4 vs n=4)
-# Required packages: readxl, ggplot2, ggrepel
+# ============================================================
+# volcano_plot_combined.R
+# CT6・CT18を統合してWT(n=4) vs KO(n=4)のボルケーノプロットを作成する
+#
+# 【なぜ統合するか】
+#   小脳ではGpr176の発現リズムが弱い → CT6/CT18を分ける生物学的根拠が薄い
+#   統合することでサンプル数が n=2 → n=4 になり、検定の信頼性が上がる
+#
+# 【volcano_plot.R との違い】
+#   n=4になるのでBH補正（多重比較補正）を試みる
+#   ただし遺伝子数が多い場合はBH補正後も有意遺伝子が出ないことがある
+#   → スクリプトが自動判定してフォールバック
+# ============================================================
 
 library(readxl)
 library(ggplot2)
 library(ggrepel)
 
-# ---- Parameters ----
-INPUT_FILE  <- "allpresence.xlsx"        # Excelファイルのパス
+# ---- パラメータ ----
+INPUT_FILE  <- "allpresence.xlsx"
 SHEET       <- "Allプレゼンスのみ"
-FC_CUTOFF   <- 1.5                        # fold-change閾値（線形）
-PVAL_CUTOFF <- 0.05                       # p値閾値
-TOP_N_LABEL <- 30                         # ラベル表示する上位遺伝子数
+FC_CUTOFF   <- 1.5
+PVAL_CUTOFF <- 0.05
+TOP_N_LABEL <- 30  # CT別より多め（統合なので候補が増える）
 
-# ---- Signal column indices (1-based) ----
-# 1-WT-CT6  : col 2 / 2-WT-CT6  : col 5
-# 3-WT-CT18 : col 8 / 4-WT-CT18 : col 11
-# 5-KO-CT6  : col 14 / 6-KO-CT6  : col 17
-# 7-KO-CT18 : col 20 / 8-KO-CT18 : col 23
-WT_COLS <- c(2, 5, 8, 11)    # WT全4サンプル
-KO_COLS <- c(14, 17, 20, 23) # KO全4サンプル
+# ---- シグナル値の列番号 ----
+# CT6・CT18を区別せず、WT全4サンプル・KO全4サンプルとして扱う
+WT_COLS <- c(2, 5, 8, 11)    # 1-WT-CT6, 2-WT-CT6, 3-WT-CT18, 4-WT-CT18
+KO_COLS <- c(14, 17, 20, 23) # 5-KO-CT6, 6-KO-CT6, 7-KO-CT18, 8-KO-CT18
 
 GENE_SYMBOL_COL <- "Gene Symbol"
 PROBE_ID_COL    <- "Probe Set ID"
 
-# ---- Load data ----
+# ---- データ読み込み ----
 message("Reading: ", INPUT_FILE, "  sheet: ", SHEET)
 raw <- read_excel(INPUT_FILE, sheet = SHEET)
 
@@ -38,7 +46,8 @@ to_mat <- function(cols) {
 wt_mat <- to_mat(WT_COLS)
 ko_mat <- to_mat(KO_COLS)
 
-# ---- 統計検定（n=4 vs n=4, Welch t検定） ----
+# ---- 統計計算 ----
+# n=4 vs n=4 の Welch t検定
 log2fc <- log2(rowMeans(ko_mat, na.rm = TRUE) / rowMeans(wt_mat, na.rm = TRUE))
 
 pvals <- vapply(seq_len(nrow(raw)), function(i) {
@@ -48,7 +57,10 @@ pvals <- vapply(seq_len(nrow(raw)), function(i) {
   )
 }, numeric(1))
 
-# n=4なのでBH補正を適用
+# BH補正（Benjamini-Hochberg法）による多重比較補正
+# 数万プローブを同時に検定するため、偽陽性を制御する必要がある
+# BH補正: FDR（偽発見率）を指定した割合以下に抑える
+# n=4でも検出力が低い場合はpadj ≈ 1 になることがある
 padj <- p.adjust(pvals, method = "BH")
 
 # ---- 結果テーブル ----
@@ -62,8 +74,8 @@ res <- data.frame(
 )
 res <- res[complete.cases(res), ]
 
-# BH補正で有意なものが少ない場合はraw p値でも分類
-res$sig_bh  <- "NS"
+# BH補正版とraw p値版の両方で有意遺伝子を分類
+res$sig_bh <- "NS"
 res$sig_bh[res$log2FC >=  log2(FC_CUTOFF) & res$padj < PVAL_CUTOFF] <- "Up in KO"
 res$sig_bh[res$log2FC <= -log2(FC_CUTOFF) & res$padj < PVAL_CUTOFF] <- "Down in KO"
 
@@ -71,22 +83,28 @@ res$sig_raw <- "NS"
 res$sig_raw[res$log2FC >=  log2(FC_CUTOFF) & res$pval < PVAL_CUTOFF] <- "Up in KO"
 res$sig_raw[res$log2FC <= -log2(FC_CUTOFF) & res$pval < PVAL_CUTOFF] <- "Down in KO"
 
+# 有意遺伝子数を確認
 message(sprintf("BH補正あり → Up: %d  Down: %d",
                 sum(res$sig_bh == "Up in KO"), sum(res$sig_bh == "Down in KO")))
 message(sprintf("raw p値    → Up: %d  Down: %d",
                 sum(res$sig_raw == "Up in KO"), sum(res$sig_raw == "Down in KO")))
 
-# プロット用にどちらを使うか自動判定（BH補正で有意遺伝子が10個以上あればBH採用）
+# BH補正で10個以上有意遺伝子があればBH採用、少なければraw p値にフォールバック
 use_bh <- sum(res$sig_bh != "NS") >= 10
 res$sig <- if (use_bh) res$sig_bh else res$sig_raw
-y_label <- if (use_bh) expression(-log[10]~"(adjusted p-value, BH)") else expression(-log[10]~"(p-value, raw)")
-y_val   <- if (use_bh) -log10(res$padj) else -log10(res$pval)
-res$y   <- y_val
-subtitle_note <- if (use_bh) "BH補正適用 (n=4)" else "raw p値使用 (n=4)"
+
+# Y軸の値とラベルをBH/rawで切り替え
+y_label <- if (use_bh) {
+  expression(-log[10]~"(adjusted p-value, BH)")
+} else {
+  expression(-log[10]~"(p-value, raw)")
+}
+res$y          <- if (use_bh) -log10(res$padj) else -log10(res$pval)
+subtitle_note  <- if (use_bh) "BH補正適用 (n=4)" else "raw p値使用 (n=4)"
 
 res$sig <- factor(res$sig, levels = c("Up in KO", "Down in KO", "NS"))
 
-# ---- ラベル遺伝子 ----
+# ---- ラベル遺伝子の選定 ----
 sig_rows  <- res[res$sig != "NS", ]
 n_top     <- min(TOP_N_LABEL, nrow(sig_rows))
 top_genes <- sig_rows[order(if (use_bh) sig_rows$padj else sig_rows$pval)[seq_len(n_top)], ]
@@ -132,12 +150,13 @@ message("Saved: volcano_combined.pdf")
 print(p)
 
 # ---- 結果CSV ----
+# sig_bh: BH補正での有意判定  sig_raw: raw p値での有意判定
 out <- res[order(if (use_bh) res$padj else res$pval),
            c("probe_id", "gene_symbol", "log2FC", "pval", "padj", "sig_bh", "sig_raw")]
 write.csv(out, "volcano_results_combined.csv", row.names = FALSE)
 message("Saved: volcano_results_combined.csv")
 
-# ---- Up遺伝子リスト（リガンド候補） ----
+# Up遺伝子リスト（いずれかの基準で有意なもの）
 up <- out[out$sig_bh == "Up in KO" | out$sig_raw == "Up in KO", ]
 write.csv(up, "up_genes_combined.csv", row.names = FALSE)
 message(sprintf("Saved: up_genes_combined.csv  (%d probes)", nrow(up)))
