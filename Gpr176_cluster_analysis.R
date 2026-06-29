@@ -38,6 +38,12 @@ OUT_DIR          <- "Gpr176_cluster_results"
 GPR176_THRESHOLD <- 0      # log-norm > 0 で陽性
 POS_PCT_THR      <- 10     # クラスター内Gpr176陽性率(%)がこれ以上を陽性クラスターとする
 
+# 解凍済みファイルを直接指定する場合はここに記入（NULLなら自動検出）
+MANUAL_MTX      <- NULL   # 例: "cb_adult_mouse.mtx.gz"
+MANUAL_BARCODES <- NULL   # 例: "cb_adult_mouse_barcodes"
+MANUAL_GENES    <- NULL   # 例: "cb_adult_mouse_genes"
+MANUAL_META     <- NULL   # 例: "cb_adult_mouse_metadata.txt"（なければNULL）
+
 dir.create(OUT_DIR, showWarnings = FALSE)
 
 # ---- ユーティリティ ----
@@ -49,23 +55,37 @@ find_gene <- function(gene, all_genes) {
 }
 
 # ================================================================
-# Step 1: tar.gz の解凍
+# Step 1: ファイルの探索（解凍済み優先、なければtar.gzを解凍）
 # ================================================================
-message("\n=== Step 1: ファイルの解凍 ===")
+message("\n=== Step 1: ファイルの探索 ===")
 
-if (!file.exists(TAR_FILE))
-  stop("ファイルが見つかりません: ", TAR_FILE,
-       "\nスクリプトと同じフォルダに置いてください。")
+# 検索対象ディレクトリ（カレント + extracted/）
+search_dirs <- c(".", file.path(OUT_DIR, "extracted"))
 
-extract_dir <- file.path(OUT_DIR, "extracted")
-dir.create(extract_dir, showWarnings = FALSE)
+# カレントディレクトリ直下に解凍済みファイルがあるか確認
+pre_extracted <- list.files(".", recursive = FALSE, full.names = TRUE)
+pre_extracted <- c(pre_extracted,
+                   list.files(file.path(OUT_DIR, "extracted"),
+                              recursive = TRUE, full.names = TRUE))
 
-message("解凍中: ", TAR_FILE, " → ", extract_dir)
-untar(TAR_FILE, exdir = extract_dir)
+has_mtx <- any(grepl("\\.mtx(\\.gz)?$", pre_extracted, ignore.case = TRUE))
 
-# 解凍されたファイル一覧
-all_files <- list.files(extract_dir, recursive = TRUE, full.names = TRUE)
-message("解凍ファイル数: ", length(all_files))
+if (has_mtx) {
+  message("解凍済みファイルを検出 → 解凍をスキップ")
+  all_files <- pre_extracted
+} else if (file.exists(TAR_FILE)) {
+  extract_dir <- file.path(OUT_DIR, "extracted")
+  dir.create(extract_dir, showWarnings = FALSE)
+  message("解凍中: ", TAR_FILE, " → ", extract_dir)
+  untar(TAR_FILE, exdir = extract_dir)
+  all_files <- list.files(extract_dir, recursive = TRUE, full.names = TRUE)
+} else {
+  stop("データファイルが見つかりません。\n",
+       "・tar.gzが未解凍の場合: ", TAR_FILE, " をこのスクリプトと同じフォルダに置いてください。\n",
+       "・解凍済みの場合: mtx, barcodes, genes ファイルが同じフォルダにあるか確認してください。")
+}
+
+message("検出ファイル:")
 for (f in head(all_files, 20)) message("  ", basename(f))
 if (length(all_files) > 20) message("  ...他 ", length(all_files) - 20, " ファイル")
 
@@ -83,62 +103,68 @@ find_file <- function(paths, patterns) {
 
 seurat_obj <- NULL
 
-# (A) Seurat RDS
-rds_file <- find_file(all_files, c("\\.rds$"))
-if (!is.null(rds_file) && has_seurat) {
-  message("Seuratオブジェクトを読み込み: ", basename(rds_file))
-  seurat_obj <- readRDS(rds_file)
-  message("読み込み完了: ", ncol(seurat_obj), " 細胞 × ", nrow(seurat_obj), " 遺伝子")
-}
-
-# (B) 10x Market Exchange (mtx + barcodes + features)
-if (is.null(seurat_obj)) {
-  mtx_file  <- find_file(all_files, c("matrix\\.mtx(\\.gz)?$"))
-  bar_file  <- find_file(all_files, c("barcodes\\.tsv(\\.gz)?$"))
-  feat_file <- find_file(all_files, c("features\\.tsv(\\.gz)?$",
-                                      "genes\\.tsv(\\.gz)?$"))
-
-  if (!is.null(mtx_file) && !is.null(bar_file) && !is.null(feat_file)) {
-    message("10x形式を読み込み中...")
-    if (has_seurat) {
-      counts    <- Seurat::ReadMtx(mtx = mtx_file,
-                                   cells = bar_file,
-                                   features = feat_file)
-      seurat_obj <- Seurat::CreateSeuratObject(counts = counts,
-                                               project = "GSE165371")
-    } else {
-      mat <- Matrix::readMM(mtx_file)
-      barcodes  <- read.table(bar_file,  header = FALSE)[[1]]
-      features  <- read.table(feat_file, header = FALSE, sep = "\t")
-      gene_names <- if (ncol(features) >= 2) features[[2]] else features[[1]]
-      rownames(mat) <- gene_names
-      colnames(mat) <- barcodes
-      # 簡易オブジェクトとしてリストで保持
-      seurat_obj <- list(counts = mat, meta = data.frame(row.names = barcodes))
-    }
-    message("読み込み完了")
+# 手動指定があればそれを優先
+if (!is.null(MANUAL_MTX)) {
+  mtx_file  <- MANUAL_MTX
+  bar_file  <- MANUAL_BARCODES
+  feat_file <- MANUAL_GENES
+} else {
+  # (A) Seurat RDS
+  rds_file <- find_file(all_files, c("\\.rds$"))
+  if (!is.null(rds_file) && has_seurat) {
+    message("Seuratオブジェクトを読み込み: ", basename(rds_file))
+    seurat_obj <- readRDS(rds_file)
+    message("読み込み完了: ", ncol(seurat_obj), " 細胞 × ", nrow(seurat_obj), " 遺伝子")
   }
+
+  # (B) mtx + barcodes + genes（拡張子なしも対応）
+  mtx_file  <- find_file(all_files, c("\\.mtx(\\.gz)?$"))
+  bar_file  <- find_file(all_files, c("barcodes(\\.tsv)?(\\.gz)?$",
+                                      "barcodes$"))
+  feat_file <- find_file(all_files, c("genes(\\.tsv)?(\\.gz)?$",
+                                      "features(\\.tsv)?(\\.gz)?$",
+                                      "genes$", "features$"))
 }
 
-# (C) h5 / h5ad
+if (is.null(seurat_obj) && !is.null(mtx_file) && !is.null(bar_file) && !is.null(feat_file)) {
+  message("10x形式を読み込み中...")
+  message("  mtx      : ", basename(mtx_file))
+  message("  barcodes : ", basename(bar_file))
+  message("  genes    : ", basename(feat_file))
+
+  if (has_seurat) {
+    counts <- Seurat::ReadMtx(mtx      = mtx_file,
+                              cells    = bar_file,
+                              features = feat_file,
+                              feature.column = 1)   # 遺伝子名が1列目の場合
+    seurat_obj <- Seurat::CreateSeuratObject(counts = counts,
+                                             project = "GSE165371")
+  } else {
+    mat        <- Matrix::readMM(mtx_file)
+    barcodes   <- read.table(bar_file,  header = FALSE)[[1]]
+    features   <- read.table(feat_file, header = FALSE, sep = "\t")
+    gene_names <- if (ncol(features) >= 2) features[[2]] else features[[1]]
+    rownames(mat) <- gene_names
+    colnames(mat) <- barcodes
+    seurat_obj <- list(counts = mat, meta = data.frame(row.names = barcodes))
+  }
+  message("読み込み完了: ", ncol(seurat_obj), " 細胞")
+}
+
+# (C) h5
 if (is.null(seurat_obj)) {
-  h5_file <- find_file(all_files, c("\\.h5$", "\\.h5ad$", "\\.loom$"))
-  if (!is.null(h5_file)) {
-    if (has_seurat && grepl("\\.h5$", h5_file)) {
-      message("H5形式を読み込み: ", basename(h5_file))
-      counts <- Seurat::Read10X_h5(h5_file)
-      seurat_obj <- Seurat::CreateSeuratObject(counts = counts,
-                                               project = "GSE165371")
-    } else {
-      stop("h5ad/loom形式の読み込みにはPython(scanpy)が必要です。\n",
-           "代わりにSeuratパッケージをインストールしてRDSを読み込んでください。")
-    }
+  h5_file <- find_file(all_files, c("\\.h5$"))
+  if (!is.null(h5_file) && has_seurat) {
+    message("H5形式を読み込み: ", basename(h5_file))
+    counts <- Seurat::Read10X_h5(h5_file)
+    seurat_obj <- Seurat::CreateSeuratObject(counts = counts,
+                                             project = "GSE165371")
   }
 }
 
 if (is.null(seurat_obj))
   stop("認識できるデータファイルが見つかりません。\n",
-       "解凍されたファイル:\n", paste(all_files, collapse = "\n"))
+       "検出ファイル:\n", paste(basename(all_files), collapse = "\n"))
 
 # ================================================================
 # Step 3: メタデータ（細胞タイプアノテーション）の確認
