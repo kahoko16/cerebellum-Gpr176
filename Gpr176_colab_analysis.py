@@ -322,7 +322,243 @@ plt.show()
 print("棒グラフ保存完了")
 
 # ==============================================================
-# Cell 11: 最終サマリー
+# Cell 11: メタデータの読み込みとバーコード照合
+# ==============================================================
+META_FILE = os.path.join(DRIVE_DIR, "full_cb_metadata.csv")
+
+full_meta = pd.read_csv(META_FILE, index_col=0)  # index = "IXa_M003_XXXX..." 形式
+print(f"メタデータ: {len(full_meta):,} 細胞")
+print(f"細胞タイプ分布:")
+print(full_meta["final_annotation_cluster"].value_counts().head(20))
+
+# バーコード照合
+# メタデータ: "IXa_M003_CTTCCTTTCCGTATGA" → 最後の "_" 以降がバーコード本体
+# MTXバーコード: "CTTCCTTTCCGTATGA-1" または "CTTCCTTTCCGTATGA" 形式
+meta_bc      = full_meta.index.tolist()
+meta_bc_trim = [b.rsplit("_", 1)[-1] for b in meta_bc]  # バーコード本体を抽出
+
+# MTXバーコードから "-1" サフィックスを除去して照合
+mtx_bc_trim  = [b.split("-")[0] for b in barcodes]
+
+# 照合テーブルを作成
+bc_map = pd.DataFrame({
+    "mtx_barcode":  barcodes,
+    "mtx_bc_trim":  mtx_bc_trim,
+})
+meta_df = full_meta.copy()
+meta_df["meta_bc_trim"] = meta_bc_trim
+
+merged = bc_map.merge(
+    meta_df.reset_index().rename(columns={"index": "meta_barcode"}),
+    left_on  = "mtx_bc_trim",
+    right_on = "meta_bc_trim",
+    how      = "left"
+)
+merged.index = range(len(merged))
+
+n_matched = merged["final_annotation_cluster"].notna().sum()
+print(f"\nMTX細胞数       : {len(barcodes):,}")
+print(f"メタデータ一致数 : {n_matched:,} ({100*n_matched/len(barcodes):.1f}%)")
+
+# 一致率が低い場合は別の照合方法を試みる
+if n_matched / len(barcodes) < 0.5:
+    print("⚠ 一致率が低い → サンプルIDなしで再照合を試みます")
+    # メタデータのバーコードをそのまま使う
+    merged2 = bc_map.merge(
+        meta_df.reset_index().rename(columns={"index": "meta_barcode"}),
+        left_on  = "mtx_barcode",
+        right_on = "meta_barcode",
+        how      = "left"
+    )
+    n_matched2 = merged2["final_annotation_cluster"].notna().sum()
+    print(f"再照合一致数: {n_matched2:,}")
+    if n_matched2 > n_matched:
+        merged = merged2
+
+# 発現データとメタデータを統合
+cell_annotation = merged["final_annotation_cluster"].fillna("Unknown").tolist()
+cell_subtype    = merged["final_annotation_subcluster"].fillna("Unknown").tolist()
+cell_region     = merged["regions"].fillna("Unknown").tolist() if "regions" in merged.columns else ["Unknown"] * len(barcodes)
+
+meta["cell_type"]    = cell_annotation
+meta["cell_subtype"] = cell_subtype
+meta["region"]       = cell_region
+
+# プルキンエ細胞フラグ
+meta["is_purkinje"] = meta["cell_type"].str.contains("Purkinje", case=False, na=False) & \
+                      (meta["cell_type"] != "REMOVED")
+
+print(f"\nプルキンエ細胞数: {meta['is_purkinje'].sum():,}")
+print(f"細胞タイプ別Gpr176陽性率:")
+for ct in meta["cell_type"].value_counts().head(10).index:
+    ct_mask = (meta["cell_type"] == ct) & (meta["cell_type"] != "REMOVED")
+    pct = 100 * meta.loc[ct_mask, "Gpr176_positive"].mean()
+    n   = ct_mask.sum()
+    print(f"  {ct:30s}: {pct:5.1f}% (n={n:,})")
+
+# ==============================================================
+# Cell 12: ドットプロット（細胞タイプ × 遺伝子）
+# ==============================================================
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import numpy as np
+
+# REMOVED を除外
+valid_mask  = meta["cell_type"] != "REMOVED"
+valid_meta  = meta[valid_mask].copy()
+
+# 表示する細胞タイプ（Gpr176陽性率上位15 + Purkinjeを必ず含む）
+ct_gpr176 = (
+    valid_meta.groupby("cell_type")["Gpr176_positive"]
+    .agg(["mean", "count"])
+    .rename(columns={"mean": "pct_gpr176", "count": "n_cells"})
+    .query("n_cells >= 50")
+    .sort_values("pct_gpr176", ascending=False)
+)
+purkinje_cts = [c for c in ct_gpr176.index if "Purkinje" in c]
+other_cts    = [c for c in ct_gpr176.head(15).index if c not in purkinje_cts]
+show_cts     = purkinje_cts + other_cts
+show_cts     = list(dict.fromkeys(show_cts))[:20]  # 重複除去・上位20
+
+print(f"ドットプロット対象クラスター数: {len(show_cts)}")
+
+# 各クラスター × 遺伝子の平均発現量と発現率を計算
+dot_data = []
+for ct in show_cts:
+    ct_mask = valid_meta["cell_type"] == ct
+    ct_cells_idx = valid_meta.index[ct_mask]
+    for gname in plot_genes:
+        vals = expr_dict[gname][ct_cells_idx]
+        dot_data.append({
+            "cell_type": ct,
+            "gene":      gname,
+            "mean_expr": vals.mean(),
+            "pct_expr":  100 * (vals > 0).mean(),
+            "n_cells":   ct_mask.sum(),
+        })
+
+dot_df = pd.DataFrame(dot_data)
+
+# Gpr176陽性率でクラスターを並べ替え
+ct_order = ct_gpr176.loc[ct_gpr176.index.isin(show_cts)].sort_values("pct_gpr176").index.tolist()
+dot_df["cell_type"] = pd.Categorical(dot_df["cell_type"], categories=ct_order, ordered=True)
+dot_df = dot_df.sort_values("cell_type")
+
+# プロット
+fig, ax = plt.subplots(figsize=(len(plot_genes) * 1.8 + 2, len(show_cts) * 0.45 + 2))
+
+for j, gene in enumerate(plot_genes):
+    gene_df = dot_df[dot_df["gene"] == gene]
+    for i, ct in enumerate(ct_order):
+        row = gene_df[gene_df["cell_type"] == ct]
+        if len(row) == 0:
+            continue
+        size  = row["pct_expr"].values[0] * 4   # 発現率 → ドットサイズ
+        color = row["mean_expr"].values[0]
+        ax.scatter(j, i, s=size, c=[[color]], cmap="Reds",
+                   vmin=0, vmax=dot_df["mean_expr"].max(),
+                   edgecolors="gray", linewidths=0.3)
+
+ax.set_xticks(range(len(plot_genes)))
+ax.set_xticklabels(plot_genes, fontsize=11, fontstyle="italic")
+ax.set_yticks(range(len(ct_order)))
+ax.set_yticklabels(ct_order, fontsize=8)
+ax.set_xlabel("遺伝子", fontsize=11)
+ax.set_ylabel("細胞タイプ（Gpr176陽性率昇順）", fontsize=10)
+ax.set_title("Gpr176 / Gnaz / Rgs16 発現（細胞タイプ別）\nKozareva et al. 2021 (GSE165371)",
+             fontsize=11)
+
+# カラーバー（平均発現量）
+sm = plt.cm.ScalarMappable(cmap="Reds",
+     norm=plt.Normalize(0, dot_df["mean_expr"].max()))
+sm.set_array([])
+cbar = plt.colorbar(sm, ax=ax, shrink=0.4, pad=0.02)
+cbar.set_label("平均UMIカウント", fontsize=9)
+
+# サイズ凡例
+for pct_val in [10, 30, 50]:
+    ax.scatter([], [], s=pct_val * 4, c="gray", alpha=0.5,
+               label=f"{pct_val}%")
+ax.legend(title="発現細胞率", loc="lower right", fontsize=8, title_fontsize=9)
+
+plt.tight_layout()
+plt.savefig(os.path.join(OUT_DIR, "dotplot_celltype_Gpr176_Gnaz_RGS16.pdf"), bbox_inches="tight")
+plt.savefig(os.path.join(OUT_DIR, "dotplot_celltype_Gpr176_Gnaz_RGS16.png"), dpi=150, bbox_inches="tight")
+plt.show()
+print("ドットプロット保存完了")
+
+# ==============================================================
+# Cell 13: プルキンエ細胞のみの詳細解析
+# ==============================================================
+purk_mask = meta["is_purkinje"].values
+n_purk    = purk_mask.sum()
+print(f"\nプルキンエ細胞解析 (n={n_purk:,})")
+
+if n_purk > 0:
+    purk_results = []
+    for gname in ["Gnaz", "Rgs16"]:
+        if gname not in expr_dict:
+            continue
+        expr    = expr_dict[gname]
+        gpr_pos = gpr176_pos & purk_mask
+        gpr_neg = (~gpr176_pos) & purk_mask
+
+        pos_vals = expr[gpr_pos]
+        neg_vals = expr[gpr_neg]
+
+        if len(pos_vals) == 0 or len(neg_vals) == 0:
+            continue
+
+        stat, pval = stats.mannwhitneyu(pos_vals, neg_vals, alternative="greater")
+        pct_pos = 100 * (pos_vals > 0).mean()
+        pct_neg = 100 * (neg_vals > 0).mean()
+        log2fc  = np.log2((pos_vals.mean() + 1e-6) / (neg_vals.mean() + 1e-6))
+        sig = "***" if pval < 0.001 else "**" if pval < 0.01 else "*" if pval < 0.05 else "ns"
+
+        purk_results.append({
+            "gene": gname,
+            "n_Gpr176pos_purkinje": int(gpr_pos.sum()),
+            "n_Gpr176neg_purkinje": int(gpr_neg.sum()),
+            "pct_expressed_pos": round(pct_pos, 2),
+            "pct_expressed_neg": round(pct_neg, 2),
+            "log2FC": round(log2fc, 4),
+            "mannwhitney_pval": float(f"{pval:.4e}"),
+            "significance": sig,
+        })
+        print(f"  [{gname}] プルキンエ内 Gpr176+: {pct_pos:.1f}% vs Gpr176-: {pct_neg:.1f}%  {sig}")
+
+    purk_df = pd.DataFrame(purk_results)
+    purk_df.to_csv(os.path.join(OUT_DIR, "purkinje_Gnaz_RGS16_results.csv"), index=False)
+
+    # プルキンエ細胞バイオリンプロット
+    fig, axes = plt.subplots(1, len(plot_genes), figsize=(4 * len(plot_genes), 5))
+    if len(plot_genes) == 1:
+        axes = [axes]
+
+    for ax, gname in zip(axes, plot_genes):
+        plot_data = pd.DataFrame({
+            "expr":  expr_dict[gname][purk_mask],
+            "group": np.where(gpr176_pos[purk_mask], "Gpr176+", "Gpr176-"),
+        })
+        sns.violinplot(data=plot_data, x="group", y="expr",
+                       palette={"Gpr176+": "#E64B35", "Gpr176-": "#4DBBD5"},
+                       ax=ax, cut=0, inner="box")
+        ax.set_title(gname, fontsize=12, fontweight="bold", fontstyle="italic")
+        ax.set_xlabel("")
+        ax.set_ylabel("UMI count")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+    plt.suptitle(f"プルキンエ細胞のみ (n={n_purk:,})\nGpr176陽性 vs 陰性での発現",
+                 fontsize=12, y=1.02)
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUT_DIR, "violin_purkinje_Gpr176_Gnaz_RGS16.pdf"), bbox_inches="tight")
+    plt.savefig(os.path.join(OUT_DIR, "violin_purkinje_Gpr176_Gnaz_RGS16.png"), dpi=150, bbox_inches="tight")
+    plt.show()
+    print("プルキンエ細胞バイオリンプロット保存完了")
+
+# ==============================================================
+# Cell 14: 最終サマリー
 # ==============================================================
 print("\n" + "=" * 50)
 print("         解析完了サマリー")
