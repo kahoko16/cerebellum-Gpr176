@@ -8,7 +8,9 @@ macro "Export Selected Z as 16-bit from Olympus files" {
     //
     // 出力ファイル名は入力と同じ basename になるので、既存の
     // ROI (.zip) をそのまま適用できる（ROIは座標情報なのでbit深度に
-    // 依存しない）。
+    // 依存しない）。実行するたびに指定フォルダの下にタイムスタンプ付き
+    // サブフォルダ(run_YYYYMMDD_HHMMSS)を新規作成してそこに書き出すので、
+    // 過去の出力を上書き・削除することはない。
     //
     // 前提: ファイル名が "○○○_C001Z004.tif" のように
     // 末尾に "_C<チャンネル3桁>Z<Z番号3桁>" が付いている形式。
@@ -21,10 +23,6 @@ macro "Export Selected Z as 16-bit from Olympus files" {
     // 定量に使うチャンネル番号(Olympusファイル内のチャンネル通し番号)。
     // ファイル名の "_C001" 等の数字とは別物の場合があるので要確認。
     targetChannel = 1;
-
-    // 出力先に同名のtifが既にある場合、上書きして作り直すかどうか
-    // true: 常に作り直す / false: 既にあるものはスキップする
-    overwriteExisting = true;
 
     // tif作成時に元のOlympusファイル名には無い波長サフィックスを
     // 追加している場合、ここに指定すると元ファイル名から取り除く
@@ -39,8 +37,18 @@ macro "Export Selected Z as 16-bit from Olympus files" {
     olympusDir = getDirectory("元のOlympusファイル(.oib/.oir/.oif)が入っているフォルダを選択してください");
     if (olympusDir == "") exit("フォルダが選択されませんでした。");
 
-    outputDir = getDirectory("16bit tifの保存先フォルダを選択してください");
-    if (outputDir == "") exit("フォルダが選択されませんでした。");
+    outputDirBase = getDirectory("16bit tifの保存先フォルダを選択してください");
+    if (outputDirBase == "") exit("フォルダが選択されませんでした。");
+
+    // 実行するたびにタイムスタンプ付きのサブフォルダに書き出すので、
+    // 既存の出力を上書き/削除することはない（basenameは変えないので
+    // ROI(.zip)との対応関係はそのフォルダ内でそのまま使える）
+    getDateAndTime(year, month, dayOfWeek, dayOfMonth, hour, minute, second, msec);
+    runFolderName = "run_" + year + IJ.pad(month + 1, 2) + IJ.pad(dayOfMonth, 2) +
+                     "_" + IJ.pad(hour, 2) + IJ.pad(minute, 2) + IJ.pad(second, 2);
+    outputDir = outputDirBase + runFolderName + "/";
+    File.makeDirectory(outputDir);
+    print("出力先フォルダ: " + outputDir);
 
     list = getFileList(selectedDir);
     nDone = 0;
@@ -119,11 +127,6 @@ macro "Export Selected Z as 16-bit from Olympus files" {
         }
 
         outPath = outputDir + basename + ".tif";
-        if (!overwriteExisting && File.exists(outPath)) {
-            print("スキップ (既に出力済み): " + basename);
-            nSkipped++;
-            continue;
-        }
 
         run("Bio-Formats Importer",
             "open=[" + oibPath + "] color_mode=Default " +
