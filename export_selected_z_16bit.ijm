@@ -3,7 +3,7 @@ macro "Export Selected Z as 16-bit from Olympus files" {
     // ============================================================
     // 「良いZ」として選んで残してあるtif/zip(8bit)のファイル名から
     // チャンネル・Z番号を読み取り、対応する元のOlympusファイル
-    // (.oib / .oir) からそのチャンネル・Zスライスだけを16bitのまま
+    // (.oib / .oir / .oif) からそのチャンネル・Zスライスだけを16bitのまま
     // 読み込み直して、同じファイル名でtif保存するマクロ。
     //
     // 出力ファイル名は入力と同じ basename になるので、既存の
@@ -12,7 +12,7 @@ macro "Export Selected Z as 16-bit from Olympus files" {
     //
     // 前提: ファイル名が "○○○_C001Z004.tif" のように
     // 末尾に "_C<チャンネル3桁>Z<Z番号3桁>" が付いている形式。
-    // 元のOlympusファイルは "○○○.oib" または "○○○.oir"。
+    // 元のOlympusファイルは "○○○.oib" "○○○.oir" "○○○.oif" のいずれか。
     //
     // 注意: 実際のファイルでの動作確認はしていません。
     // 必ず1〜2ファイルで試してから一括実行してください。
@@ -32,7 +32,7 @@ macro "Export Selected Z as 16-bit from Olympus files" {
     selectedDir = getDirectory("選んだZのtif/zipが入っているフォルダを選択してください");
     if (selectedDir == "") exit("フォルダが選択されませんでした。");
 
-    olympusDir = getDirectory("元のOlympusファイル(.oib/.oir)が入っているフォルダを選択してください");
+    olympusDir = getDirectory("元のOlympusファイル(.oib/.oir/.oif)が入っているフォルダを選択してください");
     if (olympusDir == "") exit("フォルダが選択されませんでした。");
 
     outputDir = getDirectory("16bit tifの保存先フォルダを選択してください");
@@ -99,9 +99,14 @@ macro "Export Selected Z as 16-bit from Olympus files" {
         }
 
         // olympusDir直下だけでなく、サブフォルダの中も再帰的に探す
-        oibPath = findFileRecursive(olympusDir, oibBase + ".oib");
-        if (oibPath == "") {
-            oibPath = findFileRecursive(olympusDir, oibBase + ".oir");
+        // (.oif は本体が小さいメタデータファイルで、実データは同名の
+        //  "○○○.oif.files" フォルダ内に入っているが、Bio-Formatsは
+        //  .oifファイルを指定するだけで中身を自動で読んでくれる)
+        oibExtensions = newArray(".oib", ".oir", ".oif");
+        oibPath = "";
+        for (e = 0; e < oibExtensions.length; e++) {
+            oibPath = findFileRecursive(olympusDir, oibBase + oibExtensions[e]);
+            if (oibPath != "") break;
         }
         if (oibPath == "") {
             print("スキップ (元のOlympusファイルが見つかりません): " + oibBase);
