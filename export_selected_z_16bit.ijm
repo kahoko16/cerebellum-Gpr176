@@ -1,0 +1,116 @@
+macro "Export Selected Z as 16-bit from Olympus files" {
+
+    // ============================================================
+    // 「良いZ」として選んで残してあるtif/zip(8bit)のファイル名から
+    // チャンネル・Z番号を読み取り、対応する元のOlympusファイル
+    // (.oib / .oir) からそのチャンネル・Zスライスだけを16bitのまま
+    // 読み込み直して、同じファイル名でtif保存するマクロ。
+    //
+    // 出力ファイル名は入力と同じ basename になるので、既存の
+    // ROI (.zip) をそのまま適用できる（ROIは座標情報なのでbit深度に
+    // 依存しない）。
+    //
+    // 前提: ファイル名が "○○○_C001Z004.tif" のように
+    // 末尾に "_C<チャンネル3桁>Z<Z番号3桁>" が付いている形式。
+    // 元のOlympusファイルは "○○○.oib" または "○○○.oir"。
+    //
+    // 注意: 実際のファイルでの動作確認はしていません。
+    // 必ず1〜2ファイルで試してから一括実行してください。
+    // ============================================================
+
+    // 定量に使うチャンネル番号(Olympusファイル内のチャンネル通し番号)。
+    // ファイル名の "_C001" 等の数字とは別物の場合があるので要確認。
+    targetChannel = 1;
+
+    selectedDir = getDirectory("選んだZのtif/zipが入っているフォルダを選択してください");
+    if (selectedDir == "") exit("フォルダが選択されませんでした。");
+
+    olympusDir = getDirectory("元のOlympusファイル(.oib/.oir)が入っているフォルダを選択してください");
+    if (olympusDir == "") exit("フォルダが選択されませんでした。");
+
+    outputDir = getDirectory("16bit tifの保存先フォルダを選択してください");
+    if (outputDir == "") exit("フォルダが選択されませんでした。");
+
+    list = getFileList(selectedDir);
+    nDone = 0;
+    nSkipped = 0;
+
+    for (i = 0; i < list.length; i++) {
+        fileName = list[i];
+        lowerName = toLowerCase(fileName);
+        if (!endsWith(lowerName, ".tif") && !endsWith(lowerName, ".tiff")) continue;
+
+        dotIndex = lastIndexOf(fileName, ".");
+        basename = substring(fileName, 0, dotIndex);
+
+        // 末尾から "Z<数字>" を探す
+        zPos = -1;
+        for (p = lengthOf(basename) - 1; p >= 0; p--) {
+            c = substring(basename, p, p + 1);
+            if (c == "Z") {
+                zPos = p;
+                break;
+            }
+        }
+        if (zPos == -1) {
+            print("スキップ (Zが見つかりません): " + fileName);
+            nSkipped++;
+            continue;
+        }
+        zStr = substring(basename, zPos + 1);
+        if (!matches(zStr, "[0-9]+")) {
+            print("スキップ (Z番号が数値ではありません): " + fileName);
+            nSkipped++;
+            continue;
+        }
+        zIndex = parseInt(zStr);
+
+        // "Z<数字>" の直前の "_" を探して、そこまでを元ファイル名とする
+        cPos = -1;
+        for (p = zPos - 1; p >= 0; p--) {
+            c = substring(basename, p, p + 1);
+            if (c == "_") {
+                cPos = p;
+                break;
+            }
+        }
+        if (cPos == -1) {
+            print("スキップ (区切り文字が見つかりません): " + fileName);
+            nSkipped++;
+            continue;
+        }
+        oibBase = substring(basename, 0, cPos);
+
+        oibPath = olympusDir + oibBase + ".oib";
+        if (!File.exists(oibPath)) {
+            oibPath = olympusDir + oibBase + ".oir";
+        }
+        if (!File.exists(oibPath)) {
+            print("スキップ (元のOlympusファイルが見つかりません): " + oibBase);
+            nSkipped++;
+            continue;
+        }
+
+        outPath = outputDir + basename + ".tif";
+        if (File.exists(outPath)) {
+            print("スキップ (既に出力済み): " + basename);
+            nSkipped++;
+            continue;
+        }
+
+        run("Bio-Formats Importer",
+            "open=[" + oibPath + "] color_mode=Default " +
+            "specify_range " +
+            "c_begin=" + targetChannel + " c_end=" + targetChannel + " c_step=1 " +
+            "z_begin=" + zIndex + " z_end=" + zIndex + " z_step=1 " +
+            "t_begin=1 t_end=1 t_step=1");
+
+        saveAs("Tiff", outPath);
+        close();
+
+        print(basename + " -> 16bit書き出し完了 (channel=" + targetChannel + ", z=" + zIndex + ")");
+        nDone++;
+    }
+
+    showMessage("完了: " + nDone + "件書き出し / " + nSkipped + "件スキップ\n詳細はLogウィンドウを確認してください。");
+}
