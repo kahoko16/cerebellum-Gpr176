@@ -25,8 +25,9 @@ macro "Export Selected Z as 16-bit from Olympus files" {
     // tif作成時に元のOlympusファイル名には無い波長サフィックスを
     // 追加している場合、ここに指定すると元ファイル名から取り除く
     // (例: "260703-WT-DMSO-before-1206_02-488" -> "260703-WT-DMSO-before-1206_02")
-    // 不要なら空文字 "" のままにする
-    wavelengthSuffix = "-488";
+    // ファイルによって "-488" と "=488" のように表記がゆれている場合は、
+    // 両方とも配列に入れておけば両方試す。不要なら空配列 newArray() のままにする
+    wavelengthSuffixCandidates = newArray("-488", "=488");
 
     selectedDir = getDirectory("選んだZのtif/zipが入っているフォルダを選択してください");
     if (selectedDir == "") exit("フォルダが選択されませんでした。");
@@ -88,8 +89,13 @@ macro "Export Selected Z as 16-bit from Olympus files" {
         oibBase = substring(basename, 0, cPos);
 
         // tif作成時にだけ付けた波長サフィックスを、元ファイル名から取り除く
-        if (wavelengthSuffix != "" && endsWith(oibBase, wavelengthSuffix)) {
-            oibBase = substring(oibBase, 0, lengthOf(oibBase) - lengthOf(wavelengthSuffix));
+        // (表記ゆれがあり得るので、候補を順番に試す)
+        for (s = 0; s < wavelengthSuffixCandidates.length; s++) {
+            suffix = wavelengthSuffixCandidates[s];
+            if (suffix != "" && endsWith(oibBase, suffix)) {
+                oibBase = substring(oibBase, 0, lengthOf(oibBase) - lengthOf(suffix));
+                s = wavelengthSuffixCandidates.length; // 一致したらループを抜ける
+            }
         }
 
         // olympusDir直下だけでなく、サブフォルダの中も再帰的に探す
