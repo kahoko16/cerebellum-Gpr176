@@ -22,6 +22,10 @@ macro "Export Selected Z as 16-bit from Olympus files" {
     // ファイル名の "_C001" 等の数字とは別物の場合があるので要確認。
     targetChannel = 1;
 
+    // 出力先に同名のtifが既にある場合、上書きして作り直すかどうか
+    // true: 常に作り直す / false: 既にあるものはスキップする
+    overwriteExisting = true;
+
     // tif作成時に元のOlympusファイル名には無い波長サフィックスを
     // 追加している場合、ここに指定すると元ファイル名から取り除く
     // (例: "260703-WT-DMSO-before-1206_02-488" -> "260703-WT-DMSO-before-1206_02")
@@ -115,7 +119,7 @@ macro "Export Selected Z as 16-bit from Olympus files" {
         }
 
         outPath = outputDir + basename + ".tif";
-        if (File.exists(outPath)) {
+        if (!overwriteExisting && File.exists(outPath)) {
             print("スキップ (既に出力済み): " + basename);
             nSkipped++;
             continue;
