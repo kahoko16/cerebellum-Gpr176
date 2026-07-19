@@ -81,11 +81,12 @@ macro "Export Selected Z as 16-bit from Olympus files" {
         }
         oibBase = substring(basename, 0, cPos);
 
-        oibPath = olympusDir + oibBase + ".oib";
-        if (!File.exists(oibPath)) {
-            oibPath = olympusDir + oibBase + ".oir";
+        // olympusDir直下だけでなく、サブフォルダの中も再帰的に探す
+        oibPath = findFileRecursive(olympusDir, oibBase + ".oib");
+        if (oibPath == "") {
+            oibPath = findFileRecursive(olympusDir, oibBase + ".oir");
         }
-        if (!File.exists(oibPath)) {
+        if (oibPath == "") {
             print("スキップ (元のOlympusファイルが見つかりません): " + oibBase);
             nSkipped++;
             continue;
@@ -113,4 +114,22 @@ macro "Export Selected Z as 16-bit from Olympus files" {
     }
 
     showMessage("完了: " + nDone + "件書き出し / " + nSkipped + "件スキップ\n詳細はLogウィンドウを確認してください。");
+}
+
+// dir以下をサブフォルダも含めて再帰的に探索し、
+// ファイル名がtargetNameと一致する最初のファイルのフルパスを返す。
+// 見つからない場合は空文字を返す。
+function findFileRecursive(dir, targetName) {
+    list = getFileList(dir);
+    for (idx = 0; idx < list.length; idx++) {
+        entry = list[idx];
+        path = dir + entry;
+        if (endsWith(entry, "/")) {
+            found = findFileRecursive(path, targetName);
+            if (found != "") return found;
+        } else if (entry == targetName) {
+            return path;
+        }
+    }
+    return "";
 }
