@@ -22,6 +22,12 @@ macro "Export Selected Z as 16-bit from Olympus files" {
     // ファイル名の "_C001" 等の数字とは別物の場合があるので要確認。
     targetChannel = 1;
 
+    // tif作成時に元のOlympusファイル名には無い波長サフィックスを
+    // 追加している場合、ここに指定すると元ファイル名から取り除く
+    // (例: "260703-WT-DMSO-before-1206_02-488" -> "260703-WT-DMSO-before-1206_02")
+    // 不要なら空文字 "" のままにする
+    wavelengthSuffix = "-488";
+
     selectedDir = getDirectory("選んだZのtif/zipが入っているフォルダを選択してください");
     if (selectedDir == "") exit("フォルダが選択されませんでした。");
 
@@ -80,6 +86,11 @@ macro "Export Selected Z as 16-bit from Olympus files" {
             continue;
         }
         oibBase = substring(basename, 0, cPos);
+
+        // tif作成時にだけ付けた波長サフィックスを、元ファイル名から取り除く
+        if (wavelengthSuffix != "" && endsWith(oibBase, wavelengthSuffix)) {
+            oibBase = substring(oibBase, 0, lengthOf(oibBase) - lengthOf(wavelengthSuffix));
+        }
 
         // olympusDir直下だけでなく、サブフォルダの中も再帰的に探す
         oibPath = findFileRecursive(olympusDir, oibBase + ".oib");
